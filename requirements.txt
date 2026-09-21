@@ -1,0 +1,6 @@
+# Versões fixadas nas mesmas que rodam em .pylibs na máquina local, pro
+# container não divergir do que foi testado.
+openai==3.16.1
+agentops==0.4.21
+psycopg[binary]==3.3.6
+mcp==2.2.0

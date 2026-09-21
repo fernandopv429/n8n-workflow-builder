@@ -1,0 +1,17 @@
+# Segredos: no Coolify tudo vem por variável de ambiente. O .env NUNCA pode
+# entrar na imagem — quem tiver a imagem teria os tokens do n8n/OpenAI/Postgres.
+.env
+
+# JSONs reais de workflow de cliente (têm token do Kommo em texto puro) e
+# dependências locais — a imagem instala pelo requirements.txt.
+fixtures/
+.pylibs/
+
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.log
+.claude/
+testes.py
+README.md

@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentes de IA — n8n</title>
+<style>
+  :root {
+    --bg: #0a0a0c; --card: #16161a; --border: #232327; --text: #e4e4e7;
+    --muted: #86868f; --accent: #8b5cf6; --err: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .pagina-estreita { max-width: 720px; margin: 0 auto; padding: 32px 16px 80px; }
+  .pagina-larga {
+    max-width: 1080px; margin: 0 auto; padding: 20px 16px;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  @media (max-width: 600px) {
+    .pagina-estreita { padding: 20px 12px 60px; }
+    .pagina-larga { padding: 12px; }
+  }
+  h1 { font-size: 18px; font-weight: 700; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  a { color: var(--accent); }
+
+  /* dashboard */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+  .cliente-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 16px; background: var(--card);
+    cursor: pointer; text-align: left; font: inherit; color: inherit; width: 100%;
+  }
+  .cliente-card:hover { border-color: var(--accent); }
+  .cliente-card h3 { margin: 0 0 4px; font-size: 15px; }
+  .cliente-card .nicho { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  .cliente-card .status { display: inline-block; margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .cliente-card .status.clonado { color: var(--text); border-color: #3a3a40; }
+  .cliente-card .status.erro { color: var(--err); border-color: var(--err); }
+  .card-novo {
+    border: 1px dashed var(--border); border-radius: 10px; padding: 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+    gap: 4px; color: var(--muted); cursor: pointer; font: inherit; background: none;
+    min-height: 90px; width: 100%;
+  }
+  .card-novo .sinal { font-size: 28px; line-height: 1; color: var(--accent); }
+  .card-novo .rotulo { font-size: 12px; }
+  .card-novo:hover { border-color: var(--accent); color: var(--text); }
+  .card-novo:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .vazio { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; border: 1px dashed var(--border); border-radius: 10px; }
+
+  /* telas */
+  #tela-passo1, #tela-gerenciamento { display: none; }
+  .voltar {
+    background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px;
+    padding: 0; margin-bottom: 18px; text-align: left; align-self: flex-start; flex: 0 0 auto;
+  }
+  .voltar:hover { color: var(--text); }
+  fieldset {
+    border: none; border-top: 1px solid var(--border); border-radius: 0;
+    padding: 16px 0 4px; margin: 0 0 8px;
+  }
+  legend {
+    padding: 0; color: var(--text); font-size: 13px; font-weight: 700;
+    text-transform: none; letter-spacing: normal; margin-bottom: 2px;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; }
+  label:first-of-type { margin-top: 0; }
+  input, select, textarea {
+    width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: #000; color: var(--text); font-size: 13px; font-family: inherit;
+  }
+  textarea { resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .linha { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
+  .linha input[type=checkbox] { width: auto; }
+  .linha label { margin: 0; color: var(--text); font-size: 14px; }
+  button.principal {
+    width: 100%; padding: 10px; border-radius: 6px; margin-top: 22px;
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  button.principal:hover { border-color: #3a3a40; }
+  button.principal:disabled { opacity: .5; cursor: wait; }
+  #resultado, #resultado-credenciais { margin-top: 24px; }
+  .card { border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-top: 12px; color: var(--text); }
+  .card.err { border-color: var(--err); color: var(--err); }
+  .card h3 { margin: 0 0 8px; font-size: 14px; }
+  ul.avisos { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  small.hint { color: var(--muted); display: block; margin-top: 4px; }
+
+  /* tela de gerenciamento: logs + engrenagem + chat */
+  .gerenciamento-topo { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; flex: 0 0 auto; }
+  .logs-caixa { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; flex: 1; max-height: 160px; overflow-y: auto; }
+  .logs-titulo {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
+    background: none; border: none; padding: 2px 0; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  }
+  .logs-titulo:hover { color: var(--text); }
+  .logs-titulo .seta { font-size: 9px; transition: transform .15s; }
+  .logs-titulo.aberto .seta { transform: rotate(90deg); }
+  .logs-lista { font-size: 12px; color: var(--muted); flex-direction: column; gap: 5px; margin-top: 8px; }
+  .briefing-caixa {
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+    margin-bottom: 14px; flex: 0 0 auto; max-height: 260px; overflow-y: auto;
+    font-size: 12px; color: var(--muted);
+  }
+  .briefing-titulo { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .briefing-caixa summary { cursor: pointer; color: var(--text); font-size: 12px; margin-top: 8px; }
+  .briefing-conteudo {
+    white-space: pre-wrap; font-size: 12px; color: var(--text); background: #000;
+    padding: 8px; border-radius: 6px; margin-top: 6px; max-height: 200px; overflow-y: auto;
+  }
+  .logs-lista .linha-log strong { color: var(--text); }
+  .engrenagem-botao {
+    background: none; border: 1px solid var(--border); border-radius: 8px; width: 40px; height: 40px;
+    font-size: 18px; color: var(--muted); cursor: pointer; flex-shrink: 0;
+  }
+  .engrenagem-botao:hover { color: var(--text); border-color: var(--accent); }
+  .chat-area {
+    border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    color: var(--muted); font-size: 13px;
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .chat-area.vazio { align-items: center; justify-content: center; text-align: center; border-style: dashed; }
+  .msg { max-width: 80%; padding: 8px 12px; border-radius: 8px; font-size: 13px; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--card); color: var(--text); }
+  .msg.assistant { align-self: flex-start; border: 1px solid var(--border); color: var(--text); }
+  .msg.pensando { align-self: flex-start; color: var(--muted); font-style: italic; }
+  .chat-input-barra { display: flex; gap: 8px; margin-top: 12px; flex: 0 0 auto; }
+  .chat-input-barra input { flex: 1; }
+  .chat-input-barra button {
+    padding: 9px 18px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--card); color: var(--muted); cursor: not-allowed; font-size: 14px;
+  }
+
+  /* modal de credenciais */
+  .modal-fundo {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10;
+  }
+  .modal-caixa {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
+    max-width: 480px; width: 100%; max-height: 90vh; overflow-y: auto;
+  }
+  .modal-topo { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .modal-topo h2 { font-size: 16px; margin: 0; }
+  .modal-fechar { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; line-height: 1; }
+  .modal-fechar:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<main class="pagina-estreita">
+
+  <section id="dashboard">
+    <div class="grid" id="grid-clientes"></div>
+  </section>
+
+  <section id="tela-passo1">
+    <button class="voltar" id="botao-voltar-1">&larr; voltar</button>
+
+    <fieldset>
+      <legend>Cliente</legend>
+      <label for="cliente_nome">Nome do cliente</label>
+      <input id="cliente_nome" required placeholder="ex: Clínica Boa Saúde">
+
+      <label for="nicho">Nicho</label>
+      <select id="nicho" required></select>
+
+      <input type="hidden" id="workflow_origem_id">
+      <small class="hint" id="info-origem"></small>
+    </fieldset>
+
+    <fieldset>
+      <legend>Briefing (opcional)</legend>
+      <label for="briefing">Cole aqui funis desejados, particularidades do negócio, tom do agente etc.</label>
+      <textarea id="briefing" rows="6" placeholder="Cole o briefing completo aqui — gera uma sugestão de prompt e de estrutura de funil do Kommo."></textarea>
+
+      <div class="linha">
+        <input type="checkbox" id="resposta_rapida">
+        <label for="resposta_rapida">Resposta rápida — sai na hora, custa o dobro. Sem marcar, vai pela Batch API (50% mais barato, leva de minutos a horas).</label>
+      </div>
+    </fieldset>
+
+    <button type="button" class="principal" id="botao-proximo">Próximo</button>
+  </section>
+
+</main>
+
+<section id="tela-gerenciamento" class="pagina-larga">
+  <button class="voltar" id="botao-voltar-2">&larr; voltar</button>
+
+  <div class="gerenciamento-topo">
+    <div class="logs-caixa">
+      <button type="button" class="logs-titulo" id="botao-logs">Logs <span class="seta">&#9656;</span></button>
+      <div class="logs-lista" id="logs-lista" style="display:none"></div>
+    </div>
+    <button type="button" class="engrenagem-botao" id="botao-engrenagem" title="Credenciais">&#9881;</button>
+  </div>
+
+  <div class="briefing-caixa" id="briefing-caixa" style="display:none"></div>
+
+  <div class="chat-area vazio" id="chat-area"></div>
+  <div class="chat-input-barra">
+    <input type="text" id="chat-input" placeholder="Converse com o agente" disabled>
+    <button type="button" id="chat-enviar" disabled>Enviar</button>
+  </div>
+</section>
+
+<div class="modal-fundo" id="modal-engrenagem" style="display:none">
+  <div class="modal-caixa">
+    <div class="modal-topo">
+      <h2>Credenciais</h2>
+      <button type="button" class="modal-fechar" id="botao-fechar-modal">&times;</button>
+    </div>
+    <p class="sub" style="margin-top:4px">Salvar aqui cria (ou atualiza) o cliente.</p>
+
+    <form id="form-credenciais">
+      <fieldset>
+        <legend>Kommo</legend>
+        <label for="kommo_subdominio">Subdomínio (base-url)</label>
+        <input id="kommo_subdominio" required placeholder="ex: clienteboasaude">
+        <label for="kommo_token">Token de API</label>
+        <input type="password" id="kommo_token" required>
+      </fieldset>
+
+      <fieldset>
+        <legend>OpenAI</legend>
+        <label for="openai_api_key">Chave da API</label>
+        <input type="password" id="openai_api_key" required placeholder="sk-...">
+        <small class="hint">A credencial é criada no n8n na hora, com o nome "{cliente} Key OpenIA" — não precisa existir antes.</small>
+      </fieldset>
+
+      <div class="linha">
+        <input type="checkbox" id="dry_run" checked>
+        <label for="dry_run">Modo teste (dry-run) — só mostra o que seria feito, não cria nada no n8n</label>
+      </div>
+
+      <button type="submit" class="principal" id="botao-salvar-credenciais">Salvar e clonar</button>
+    </form>
+
+    <div id="resultado-credenciais"></div>
+  </div>
+</div>
+
+<script>
+const containerEstreito = document.querySelector('.pagina-estreita');
+const dashboard = document.getElementById('dashboard');
+const telaPasso1 = document.getElementById('tela-passo1');
+const telaGerenciamento = document.getElementById('tela-gerenciamento');
+const modalEngrenagem = document.getElementById('modal-engrenagem');
+
+let clienteAtualId = null;
+
+function esconderTelas() {
+  containerEstreito.style.display = 'none';
+  dashboard.style.display = 'none';
+  telaPasso1.style.display = 'none';
+  telaGerenciamento.style.display = 'none';
+}
+
+function mostrarDashboard() {
+  esconderTelas();
+  containerEstreito.style.display = 'block';
+  dashboard.style.display = 'block';
+  carregarClientes();
+}
+
+function mostrarPasso1() {
+  esconderTelas();
+  containerEstreito.style.display = 'block';
+  telaPasso1.style.display = 'block';
+  document.getElementById('cliente_nome').value = '';
+  document.getElementById('briefing').value = '';
+  document.getElementById('resposta_rapida').checked = false;
+  atualizarOrigemPeloNicho();
+}
+
+async function abrirGerenciamento(id) {
+  clienteAtualId = id;
+  esconderTelas();
+  telaGerenciamento.style.display = 'flex';
+  await carregarLogs();
+  await carregarBriefing();
+  await carregarChat();
+}
+
+async function carregarBriefing() {
+  const caixa = document.getElementById('briefing-caixa');
+  let cliente;
+  try {
+    cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
+  } catch (e) {
+    caixa.style.display = 'none';
+    return;
+  }
+
+  if (!cliente.batch_id) {
+    caixa.style.display = 'none';
+    return;
+  }
+  caixa.style.display = 'block';
+
+  if (cliente.batch_status === 'completed') {
+    const estrutura = cliente.estrutura_kommo_sugerida
+      ? JSON.stringify(cliente.estrutura_kommo_sugerida, null, 2)
+      : '(não gerado)';
+    caixa.innerHTML = `
+      <div class="briefing-titulo">Sugestão gerada via Batch API — revise antes de aplicar</div>
+      <details><summary>Prompt sugerido</summary><div class="briefing-conteudo">${escaparHtml(cliente.prompt_sugerido || '(não gerado)')}</div></details>
+      <details><summary>Estrutura de Kommo sugerida</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>`;
+  } else if (['failed', 'expired', 'cancelled'].includes(cliente.batch_status)) {
+    caixa.innerHTML = `<div class="briefing-titulo">Batch API não concluiu (status: ${cliente.batch_status})</div>`;
+  } else {
+    caixa.innerHTML = `<div class="briefing-titulo">Gerando prompt e sugestão de Kommo via Batch API (status: ${cliente.batch_status || 'enviado'}) — pode levar de minutos a horas. Recarregue a página pra checar.</div>`;
+  }
+}
+
+document.getElementById('botao-voltar-1').addEventListener('click', mostrarDashboard);
+document.getElementById('botao-voltar-2').addEventListener('click', mostrarDashboard);
+
+async function carregarClientes() {
+  const grid = document.getElementById('grid-clientes');
+  grid.innerHTML = '';
+
+  // O botão de novo cliente não depende da lista ter carregado — sempre
+  // aparece primeiro, mesmo que o /clientes falhe (Postgres fora do ar etc.)
+  const cardNovo = document.createElement('button');
+  cardNovo.type = 'button';
+  cardNovo.className = 'card-novo';
+  cardNovo.innerHTML = '<span class="sinal">+</span><span class="rotulo">novo cliente</span>';
+  cardNovo.addEventListener('click', mostrarPasso1);
+  grid.appendChild(cardNovo);
+
+  let clientes = [];
+  try {
+    const resp = await fetch('/clientes');
+    ({ clientes } = await resp.json());
+  } catch (e) {
+    const erro = document.createElement('div');
+    erro.className = 'vazio';
+    erro.style.gridColumn = '1 / -1';
+    erro.textContent = 'Não consegui carregar a lista de clientes (backend fora do ar?).';
+    grid.appendChild(erro);
+    return;
+  }
+
+  for (const c of clientes) {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'cliente-card';
+    const data = new Date(c.criado_em).toLocaleDateString('pt-BR');
+    el.innerHTML = `
+      <h3>${c.cliente_nome}</h3>
+      <div class="nicho">${c.nicho}</div>
+      <div class="status ${c.status}">${c.status}</div>
+      <div class="data" style="margin-top:6px">criado em ${data}</div>`;
+    el.addEventListener('click', () => abrirGerenciamento(c.id));
+    grid.appendChild(el);
+  }
+
+  if (clientes.length === 0) {
+    const vazio = document.createElement('div');
+    vazio.className = 'vazio';
+    vazio.style.gridColumn = '1 / -1';
+    vazio.textContent = 'Nenhum cliente clonado ainda.';
+    grid.prepend(vazio);
+  }
+}
+
+let origensConfig = [];
+
+function atualizarOrigemPeloNicho() {
+  const nicho = document.getElementById('nicho').value;
+  const campoOrigem = document.getElementById('workflow_origem_id');
+  const info = document.getElementById('info-origem');
+  const botaoProximo = document.getElementById('botao-proximo');
+
+  const opcoes = origensConfig.filter(w => w.nicho === nicho);
+  if (opcoes.length === 0) {
+    campoOrigem.value = '';
+    info.textContent = 'Nenhum template cadastrado pra esse nicho ainda — fale com quem mantém a ferramenta antes de continuar.';
+    botaoProximo.disabled = true;
+    return;
+  }
+  // curadoria manual (tabela templates_nicho no Postgres) — pega o template
+  // cadastrado do nicho, nunca inferido pelo nome do workflow no n8n.
+  campoOrigem.value = opcoes[0].id;
+  info.textContent = '';
+  botaoProximo.disabled = false;
+}
+
+async function carregarConfig() {
+  const resp = await fetch('/config');
+  const cfg = await resp.json();
+  origensConfig = cfg.origens;
+
+  const selNicho = document.getElementById('nicho');
+  for (const [chave, rotulo] of Object.entries(cfg.nichos)) {
+    const opt = document.createElement('option');
+    opt.value = chave; opt.textContent = rotulo;
+    selNicho.appendChild(opt);
+  }
+  selNicho.addEventListener('change', atualizarOrigemPeloNicho);
+  atualizarOrigemPeloNicho();
+}
+
+document.getElementById('botao-proximo').addEventListener('click', async () => {
+  const cliente_nome = document.getElementById('cliente_nome');
+  if (!cliente_nome.value.trim()) {
+    cliente_nome.reportValidity();
+    return;
+  }
+  const nicho = document.getElementById('nicho').value;
+  const workflow_origem_id = document.getElementById('workflow_origem_id').value;
+  if (!workflow_origem_id) return;
+  const briefing = document.getElementById('briefing').value.trim();
+  const resposta_rapida = document.getElementById('resposta_rapida').checked;
+
+  const botao = document.getElementById('botao-proximo');
+  botao.disabled = true;
+  botao.textContent = briefing && resposta_rapida ? 'Gerando...' : 'Criando...';
+  try {
+    const resp = await fetch('/clientes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cliente_nome: cliente_nome.value.trim(), nicho, workflow_origem_id, briefing, resposta_rapida }),
+    });
+    const corpo = await resp.json();
+    if (!resp.ok) {
+      alert(corpo.error || 'erro ao criar cliente');
+      return;
+    }
+    await abrirGerenciamento(corpo.id);
+  } finally {
+    botao.disabled = false;
+    botao.textContent = 'Próximo';
+  }
+});
+
+function formatarLinhaLog(l) {
+  const hora = new Date(l.criado_em).toLocaleTimeString('pt-BR');
+  return `<div class="linha-log"><strong>${hora}</strong> · ${l.mensagem}</div>`;
+}
+
+async function carregarLogs() {
+  const lista = document.getElementById('logs-lista');
+  try {
+    const resp = await fetch(`/clientes/${clienteAtualId}/logs`);
+    const { logs } = await resp.json();
+    lista.innerHTML = logs.length
+      ? logs.slice().reverse().map(formatarLinhaLog).join('')
+      : '<div class="linha-log">sem eventos ainda.</div>';
+  } catch (e) {
+    lista.innerHTML = '<div class="linha-log">falha ao carregar logs.</div>';
+  }
+}
+
+function escaparHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renderizarMensagens(mensagens) {
+  const area = document.getElementById('chat-area');
+  area.classList.remove('vazio');
+  area.innerHTML = mensagens.map(
+    m => `<div class="msg ${m.role}">${escaparHtml(m.conteudo)}</div>`
+  ).join('');
+  area.scrollTop = area.scrollHeight;
+}
+
+async function carregarChat() {
+  const input = document.getElementById('chat-input');
+  const botao = document.getElementById('chat-enviar');
+  const area = document.getElementById('chat-area');
+
+  const cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
+  if (cliente.status !== 'clonado') {
+    area.className = 'chat-area vazio';
+    area.textContent = 'Configure as credenciais na engrenagem pra liberar o chat.';
+    input.disabled = true;
+    botao.disabled = true;
+    return;
+  }
+
+  input.disabled = false;
+  botao.disabled = false;
+  input.placeholder = 'Converse com o agente';
+
+  const { mensagens } = await (await fetch(`/clientes/${clienteAtualId}/mensagens`)).json();
+  if (mensagens.length === 0) {
+    area.className = 'chat-area vazio';
+    area.textContent = 'Nenhuma conversa ainda — mande uma mensagem pra começar.';
+  } else {
+    renderizarMensagens(mensagens);
+  }
+}
+
+async function enviarMensagemChat() {
+  const input = document.getElementById('chat-input');
+  const botao = document.getElementById('chat-enviar');
+  const texto = input.value.trim();
+  if (!texto) return;
+
+  const area = document.getElementById('chat-area');
+  area.classList.remove('vazio');
+  const jaTinhaMensagens = area.querySelector('.msg') !== null;
+  if (!jaTinhaMensagens) area.innerHTML = '';
+  area.insertAdjacentHTML('beforeend', `<div class="msg user">${escaparHtml(texto)}</div>`);
+  area.insertAdjacentHTML('beforeend', '<div class="msg pensando" id="chat-pensando">pensando…</div>');
+  area.scrollTop = area.scrollHeight;
+
+  input.value = '';
+  input.disabled = true;
+  botao.disabled = true;
+
+  try {
+    const resp = await fetch(`/clientes/${clienteAtualId}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mensagem: texto }),
+    });
+    const corpo = await resp.json();
+    document.getElementById('chat-pensando')?.remove();
+    if (resp.ok) {
+      area.insertAdjacentHTML('beforeend', `<div class="msg assistant">${escaparHtml(corpo.resposta)}</div>`);
+    } else {
+      area.insertAdjacentHTML('beforeend', `<div class="msg assistant">Erro: ${escaparHtml(corpo.error)}</div>`);
+    }
+    area.scrollTop = area.scrollHeight;
+    await carregarLogs();
+  } catch (e) {
+    document.getElementById('chat-pensando')?.remove();
+    area.insertAdjacentHTML('beforeend', `<div class="msg assistant">Erro: ${escaparHtml(String(e))}</div>`);
+  } finally {
+    input.disabled = false;
+    botao.disabled = false;
+    input.focus();
+  }
+}
+
+document.getElementById('chat-enviar').addEventListener('click', enviarMensagemChat);
+document.getElementById('chat-input').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') enviarMensagemChat();
+});
+
+document.getElementById('botao-logs').addEventListener('click', () => {
+  const lista = document.getElementById('logs-lista');
+  const botao = document.getElementById('botao-logs');
+  const abrindo = lista.style.display === 'none';
+  lista.style.display = abrindo ? 'flex' : 'none';
+  botao.classList.toggle('aberto', abrindo);
+});
+
+document.getElementById('botao-engrenagem').addEventListener('click', () => {
+  document.getElementById('resultado-credenciais').innerHTML = '';
+  modalEngrenagem.style.display = 'flex';
+});
+document.getElementById('botao-fechar-modal').addEventListener('click', () => {
+  modalEngrenagem.style.display = 'none';
+});
+
+function renderizarResultadoCredenciais(resultado, ok) {
+  const div = document.getElementById('resultado-credenciais');
+
+  if (!ok) {
+    div.innerHTML = `<div class="card err">${resultado.error}</div>`;
+    return;
+  }
+
+  const mensagem = resultado.dry_run
+    ? 'Simulação concluída — nada foi criado no n8n. Detalhes nos logs.'
+    : 'Cliente clonado. Detalhes nos logs.';
+  div.innerHTML = `<div class="card ok">${mensagem}</div>`;
+}
+
+document.getElementById('form-credenciais').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const botao = document.getElementById('botao-salvar-credenciais');
+  botao.disabled = true;
+  botao.textContent = 'Processando...';
+  document.getElementById('resultado-credenciais').innerHTML = '';
+
+  const dados = {
+    kommo_subdominio: document.getElementById('kommo_subdominio').value,
+    kommo_token: document.getElementById('kommo_token').value,
+    openai_api_key: document.getElementById('openai_api_key').value,
+    dry_run: document.getElementById('dry_run').checked,
+  };
+
+  try {
+    const resp = await fetch(`/clientes/${clienteAtualId}/credenciais`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(dados),
+    });
+    const corpo = await resp.json();
+    renderizarResultadoCredenciais(corpo, resp.ok);
+    if (resp.ok) {
+      await carregarLogs();
+      await carregarChat();
+    }
+  } catch (e) {
+    renderizarResultadoCredenciais({ error: String(e) }, false);
+  } finally {
+    botao.disabled = false;
+    botao.textContent = 'Salvar e clonar';
+  }
+});
+
+carregarConfig();
+mostrarDashboard();
+</script>
+</body>
+</html>

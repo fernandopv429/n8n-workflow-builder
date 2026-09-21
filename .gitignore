@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.log
+.pylibs/
+
+# JSONs reais de workflow de cliente — têm token de Kommo em texto puro
+# embutido no node Database (ex: kommo-token). Nunca versionar.
+fixtures/*.json

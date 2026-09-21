@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "n8n-workflow-builder",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/home/fernandofav/Área de trabalho/n8n-workflow-builder/servidor.py", "--porta", "8099"],
+      "port": 8099
+    }
+  ]
+}
