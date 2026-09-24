@@ -62,8 +62,30 @@ class N8nClient:
             itens = [c for c in itens if c.get("type") == tipo]
         return [{"id": c["id"], "name": c["name"]} for c in itens]
 
+    def listar_workflows(self) -> list:
+        return self._request("GET", "/workflows?limit=250").get("data", [])
+
+    def paths_de_webhook_em_uso(self) -> set:
+        """Todo `path` de node webhook já existente na instância. Serve pra
+        escolher um path livre antes de criar — ativar um workflow cujo path
+        já pertence a outro devolve 409 'conflict with one of the webhooks'."""
+        usados = set()
+        for w in self.listar_workflows():
+            for n in w.get("nodes", []):
+                if n.get("type") == "n8n-nodes-base.webhook":
+                    caminho = n.get("parameters", {}).get("path")
+                    if caminho:
+                        usados.add(caminho)
+        return usados
+
     def create_workflow(self, payload: dict) -> dict:
         return self._request("POST", "/workflows", payload)
+
+    def delete_workflow(self, workflow_id: str) -> dict:
+        return self._request("DELETE", f"/workflows/{workflow_id}")
+
+    def delete_credencial(self, credencial_id: str) -> dict:
+        return self._request("DELETE", f"/credentials/{credencial_id}")
 
     def update_workflow(self, workflow_id: str, payload: dict) -> dict:
         return self._request("PUT", f"/workflows/{workflow_id}", payload)

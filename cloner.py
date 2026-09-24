@@ -144,7 +144,22 @@ def _slug(texto: str) -> str:
     return texto.strip("-") or "cliente"
 
 
-def _garantir_webhook_unico(nodes: list, manifesto: ClienteManifest, avisos: list):
+def _escolher_path_livre(cliente_nome: str, paths_em_uso: set) -> str:
+    """Um path derivado só do nome colide sempre que o nome se repete — e
+    também quando uma tentativa anterior do MESMO cliente deixou workflow pra
+    trás (foi o que aconteceu com o 'Will teste' em 21/09/2026: a 1ª clonagem
+    deu certo e as retentativas colidiram contra ela). Por isso a numeração."""
+    base = f"ecossistema-ia-{_slug(cliente_nome)}"
+    if base not in paths_em_uso:
+        return base
+    for n in range(2, 100):
+        candidato = f"{base}-{n}"
+        if candidato not in paths_em_uso:
+            return candidato
+    raise ClonagemInvalida(f"não achei path livre pra '{base}' — limpe os workflows antigos no n8n")
+
+
+def _garantir_webhook_unico(nodes: list, manifesto: ClienteManifest, avisos: list, paths_em_uso: set = None):
     """O node webhook vem do template com o MESMO `path` de todos os outros
     clientes clonados dele (e do próprio template, que é um cliente real e
     ativo) — ativar o clone sem trocar o path colide 409 "conflict with one
@@ -152,7 +167,7 @@ def _garantir_webhook_unico(nodes: list, manifesto: ClienteManifest, avisos: lis
     vivo 18/09/2026, clone de teste colidiu com o path do Fabifisio). Também
     ajusta `webhookId` pro mesmo valor — sem isso a URL de produção dá 404
     mesmo com o workflow ativo (ver memória n8n-workflow-por-api-webhookid)."""
-    novo_path = f"ecossistema-ia-{_slug(manifesto.cliente_nome)}"
+    novo_path = _escolher_path_livre(manifesto.cliente_nome, paths_em_uso or set())
     for n in nodes:
         if n.get("type") == "n8n-nodes-base.webhook":
             antigo = n.get("parameters", {}).get("path")
@@ -214,59 +229,96 @@ def montar_previa(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> dict:
     }
 
 
+def _desfazer(cliente_n8n: N8nClient, workflow_id: str, ids_subworkflows: list, credencial_id: str, avisos: list):
+    """Apaga o que já tinha sido criado quando a clonagem falha no meio.
+
+    Sem isso, cada tentativa que falha deixa workflow órfão no n8n — e como o
+    órfão fica ocupando o path do webhook, a PRÓXIMA tentativa colide 409
+    contra ele. Foi exatamente o que aconteceu com o 'Will teste' em
+    21/09/2026: 7 órfãos empilhados, todos por retentativa.
+    """
+    for wid in ([workflow_id] if workflow_id else []) + list(ids_subworkflows):
+        try:
+            cliente_n8n.deactivate_workflow(wid)
+        except Exception:  # noqa: BLE001 — já pode estar inativo
+            pass
+        try:
+            cliente_n8n.delete_workflow(wid)
+        except Exception as e:  # noqa: BLE001
+            avisos.append(f"Não consegui remover o workflow {wid} na limpeza: {e}")
+    if credencial_id:
+        try:
+            cliente_n8n.delete_credencial(credencial_id)
+        except Exception as e:  # noqa: BLE001
+            avisos.append(f"Não consegui remover a credencial {credencial_id} na limpeza: {e}")
+
+
 def executar_clone_real(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> dict:
-    """Cria de fato: credencial OpenAI, sub-workflows, workflow principal, ativa e verifica."""
+    """Cria de fato: credencial OpenAI, sub-workflows, workflow principal, ativa e verifica.
+
+    Tudo ou nada: se qualquer passo falhar, `_desfazer` apaga o que já foi
+    criado antes de propagar o erro.
+    """
     avisos = []
-
-    # O schema da credencial openAiApi tem if/then condicional em cima de
-    # "header"/"allowedHttpRequestDomains" — se essas chaves vierem AUSENTES
-    # (não só false/vazias), o "if" casa por vacuidade e o n8n passa a EXIGIR
-    # headerName/headerValue/allowedDomains (erro 400 visto em teste real,
-    # 18/09/2026). Mandar os dois campos explícitos evita cair nesse ramo.
-    credencial = cliente_n8n.criar_credencial(
-        manifesto.openai_credential_name,
-        "openAiApi",
-        {
-            "apiKey": manifesto.openai_api_key,
-            "header": False,
-            "allowedHttpRequestDomains": "all",
-        },
-    )
-    manifesto.openai_credential_id = credencial["id"]
-    avisos.append(f"Credencial OpenAI '{manifesto.openai_credential_name}' criada (id {credencial['id']}).")
-
-    template = cliente_n8n.get_workflow(manifesto.workflow_origem_id)
-    nodes = copy.deepcopy(template["nodes"])
-
-    ids_subworkflow = _referencias_subworkflow(nodes)
-    mapa_subworkflows = {}
-    if ids_subworkflow:
-        origens_subworkflow = _buscar_subworkflows(cliente_n8n, ids_subworkflow)
-        mapa_subworkflows = _criar_copias_subworkflows(cliente_n8n, origens_subworkflow, avisos)
-        _reescrever_referencias_subworkflow(nodes, mapa_subworkflows)
-        # O n8n recusa ativar o workflow principal se uma sub-workflow que ele
-        # chama via executeWorkflow/toolWorkflow não estiver "publicada"
-        # (= ativa) — erro real visto ao vivo 18/09/2026: "which is not
-        # published. Please publish all referenced sub-workflows first."
-        for novo in mapa_subworkflows.values():
-            cliente_n8n.activate_workflow(novo["id"])
-
-    _reescrever_database(nodes, manifesto, avisos)
-    _trocar_credencial_openai(nodes, manifesto, avisos)
-    _garantir_webhook_unico(nodes, manifesto, avisos)
-
-    payload = {
-        "name": f"Ecossistema IA - {manifesto.cliente_nome}",
-        "nodes": nodes,
-        "connections": copy.deepcopy(template["connections"]),
-        "settings": {"executionOrder": "v1"},
-    }
-
-    ids_antigos = set(mapa_subworkflows.keys()) | {manifesto.workflow_origem_id}
-    criado = cliente_n8n.create_workflow(payload)
-    workflow_id = criado["id"]
+    credencial_id = ""
+    workflow_id = ""
+    ids_subworkflows_criadas = []
 
     try:
+        # O schema da credencial openAiApi tem if/then condicional em cima de
+        # "header"/"allowedHttpRequestDomains" — se essas chaves vierem AUSENTES
+        # (não só false/vazias), o "if" casa por vacuidade e o n8n passa a EXIGIR
+        # headerName/headerValue/allowedDomains (erro 400 visto em teste real,
+        # 18/09/2026). Mandar os dois campos explícitos evita cair nesse ramo.
+        credencial = cliente_n8n.criar_credencial(
+            manifesto.openai_credential_name,
+            "openAiApi",
+            {
+                "apiKey": manifesto.openai_api_key,
+                "header": False,
+                "allowedHttpRequestDomains": "all",
+            },
+        )
+        credencial_id = credencial["id"]
+        manifesto.openai_credential_id = credencial_id
+        avisos.append(f"Credencial OpenAI '{manifesto.openai_credential_name}' criada (id {credencial_id}).")
+
+        # Lido ANTES de criar qualquer coisa: precisa refletir o estado do n8n
+        # sem os workflows desta clonagem.
+        paths_em_uso = cliente_n8n.paths_de_webhook_em_uso()
+
+        template = cliente_n8n.get_workflow(manifesto.workflow_origem_id)
+        nodes = copy.deepcopy(template["nodes"])
+
+        ids_subworkflow = _referencias_subworkflow(nodes)
+        mapa_subworkflows = {}
+        if ids_subworkflow:
+            origens_subworkflow = _buscar_subworkflows(cliente_n8n, ids_subworkflow)
+            mapa_subworkflows = _criar_copias_subworkflows(cliente_n8n, origens_subworkflow, avisos)
+            ids_subworkflows_criadas = [v["id"] for v in mapa_subworkflows.values()]
+            _reescrever_referencias_subworkflow(nodes, mapa_subworkflows)
+            # O n8n recusa ativar o workflow principal se uma sub-workflow que ele
+            # chama via executeWorkflow/toolWorkflow não estiver "publicada"
+            # (= ativa) — erro real visto ao vivo 18/09/2026: "which is not
+            # published. Please publish all referenced sub-workflows first."
+            for novo in mapa_subworkflows.values():
+                cliente_n8n.activate_workflow(novo["id"])
+
+        _reescrever_database(nodes, manifesto, avisos)
+        _trocar_credencial_openai(nodes, manifesto, avisos)
+        _garantir_webhook_unico(nodes, manifesto, avisos, paths_em_uso)
+
+        payload = {
+            "name": f"Ecossistema IA - {manifesto.cliente_nome}",
+            "nodes": nodes,
+            "connections": copy.deepcopy(template["connections"]),
+            "settings": {"executionOrder": "v1"},
+        }
+
+        ids_antigos = set(mapa_subworkflows.keys()) | {manifesto.workflow_origem_id}
+        criado = cliente_n8n.create_workflow(payload)
+        workflow_id = criado["id"]
+
         # `create_workflow` já manda `settings` simplificado desde a criação —
         # não precisa de um PUT extra aqui. Um PUT só com {"settings": ...}
         # (sem name/nodes/connections) dá 400 "must have required property
@@ -275,8 +327,8 @@ def executar_clone_real(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> d
         cliente_n8n.deactivate_workflow(workflow_id)
         cliente_n8n.activate_workflow(workflow_id)
         _verificar_clone(cliente_n8n, workflow_id, manifesto, ids_antigos)
-    except ClonagemInvalida:
-        cliente_n8n.deactivate_workflow(workflow_id)
+    except Exception:
+        _desfazer(cliente_n8n, workflow_id, ids_subworkflows_criadas, credencial_id, avisos)
         raise
 
     return {

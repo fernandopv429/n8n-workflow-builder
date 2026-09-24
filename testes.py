@@ -159,6 +159,23 @@ def teste_garante_webhook_unico():
     assert node_webhook.get("webhookId") == novo_path
 
 
+def teste_path_desvia_de_path_ja_em_uso():
+    """Armadilha real (21/09/2026): a 1ª clonagem do 'Will teste' deu certo e
+    ficou ativa; as retentativas geravam o MESMO path e colidiam 409 contra
+    ela — 7 workflows órfãos empilhados. O path tem que desviar do que já
+    existe na instância, não só do path do template."""
+    d = carregar("sabrina_dr_marcos__9oBmsomnh4xwuPE4.json")
+    nodes = copy.deepcopy(d["nodes"])
+    m = manifesto_exemplo(cliente_nome="Will teste")
+
+    em_uso = {"ecossistema-ia-will-teste"}  # a clonagem anterior, ativa
+    _garantir_webhook_unico(nodes, m, [], em_uso)
+
+    node_webhook = next(n for n in nodes if n.get("type") == "n8n-nodes-base.webhook")
+    assert node_webhook["parameters"]["path"] == "ecossistema-ia-will-teste-2"
+    assert node_webhook["webhookId"] == "ecossistema-ia-will-teste-2"
+
+
 def teste_identifica_agente_principal_por_nao_ser_agentemov():
     """n8n_edicao: o agente principal é sempre o node tipo agent que NÃO se
     chama 'AgenteMov' — testado contra os 4 clientes reais, personas diferentes
@@ -248,6 +265,7 @@ TESTES = [
     teste_reescreve_database_com_manifesto,
     teste_database_sem_campos_evolution_nao_bloqueia,
     teste_garante_webhook_unico,
+    teste_path_desvia_de_path_ja_em_uso,
     teste_identifica_agente_principal_por_nao_ser_agentemov,
     teste_acha_node_database_nos_4_clientes,
     teste_renomear_node_atualiza_expressoes,

@@ -44,6 +44,7 @@ sys.path.insert(0, str(RAIZ))
 import agente_chat  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
+import n8n_edicao  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
 from manifest import ClienteManifest  # noqa: E402
@@ -260,6 +261,35 @@ class Handler(BaseHTTPRequestHandler):
 
         self._responder_json(200, db.obter_cliente(cliente_id))
 
+    def _atualizar_cliente_clonado(self, cliente_id: int, cliente: dict, corpo: dict):
+        """Atualiza as credenciais do Kommo no workflow que já existe. A chave da
+        OpenAI não é reaproveitada aqui: a credencial no n8n já foi criada na
+        clonagem, e trocá-la exigiria criar outra (sobra credencial órfã)."""
+        workflow_id = cliente["workflow_novo_id"]
+        alterados = []
+        try:
+            for campo, chave_corpo in (("base-url", "kommo_subdominio"), ("kommo-token", "kommo_token")):
+                valor = str(corpo.get(chave_corpo, "")).strip()
+                if valor and valor != n8n_edicao.ler_campo_database(workflow_id, campo):
+                    n8n_edicao.atualizar_campo_database(workflow_id, campo, valor)
+                    alterados.append(campo)
+        except Exception as e:  # noqa: BLE001
+            db.registrar_log(cliente_id, "erro", f"Falha ao atualizar credenciais: {e}")
+            self._responder_json(502, {"error": f"falha ao atualizar: {e}"})
+            return
+
+        if alterados:
+            db.registrar_log(cliente_id, "sistema", f"Credenciais atualizadas no workflow existente: {', '.join(alterados)}.")
+        else:
+            db.registrar_log(cliente_id, "sistema", "Nada a atualizar — as credenciais enviadas já são as do workflow.")
+
+        self._responder_json(200, {
+            "dry_run": False,
+            "workflow_id": workflow_id,
+            "atualizado": True,
+            "campos_alterados": alterados,
+        })
+
     def _chat(self, cliente_id: int):
         try:
             corpo = self._ler_corpo()
@@ -308,6 +338,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         dry_run = bool(corpo.get("dry_run", True))
+
+        # Cliente já clonado: ATUALIZA o workflow existente em vez de clonar de
+        # novo. Sem isso, clicar "Salvar e clonar" duas vezes cria um segundo
+        # workflow que colide no path do webhook contra o primeiro — foi o que
+        # gerou 7 órfãos e uma sequência de 409 no 'Will teste' (21/09/2026).
+        if cliente["status"] == "clonado" and cliente["workflow_novo_id"] and not dry_run:
+            self._atualizar_cliente_clonado(cliente_id, cliente, corpo)
+            return
+
         dados_manifesto = {
             "cliente_nome": cliente["cliente_nome"],
             "nicho": cliente["nicho"],
