@@ -338,14 +338,23 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         dry_run = bool(corpo.get("dry_run", True))
+        forcar_novo = bool(corpo.get("forcar_novo", False))
 
-        # Cliente já clonado: ATUALIZA o workflow existente em vez de clonar de
-        # novo. Sem isso, clicar "Salvar e clonar" duas vezes cria um segundo
-        # workflow que colide no path do webhook contra o primeiro — foi o que
-        # gerou 7 órfãos e uma sequência de 409 no 'Will teste' (21/09/2026).
-        if cliente["status"] == "clonado" and cliente["workflow_novo_id"] and not dry_run:
+        # Cliente já clonado: por padrão ATUALIZA o workflow existente em vez de
+        # clonar de novo. Sem isso, clicar "Salvar e clonar" duas vezes cria um
+        # segundo workflow que colide no path do webhook contra o primeiro — foi
+        # o que gerou 7 órfãos e uma sequência de 409 no 'Will teste'
+        # (21/09/2026). Quem quiser mesmo um segundo agente marca `forcar_novo`.
+        ja_tem_agente = cliente["status"] == "clonado" and cliente["workflow_novo_id"]
+        if ja_tem_agente and not forcar_novo:
             self._atualizar_cliente_clonado(cliente_id, cliente, corpo)
             return
+        if ja_tem_agente and forcar_novo and not dry_run:
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Criando agente NOVO a pedido — o anterior ({cliente['workflow_novo_id']}) "
+                "continua no n8n e deixa de ser o agente deste cliente no painel.",
+            )
 
         dados_manifesto = {
             "cliente_nome": cliente["cliente_nome"],

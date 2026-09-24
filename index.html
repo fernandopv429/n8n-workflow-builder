@@ -146,6 +146,12 @@
     background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
     max-width: 480px; width: 100%; max-height: 90vh; overflow-y: auto;
   }
+  .aviso-existente {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 16px;
+    font-size: 12px; color: var(--muted); line-height: 1.5;
+  }
+  .aviso-existente strong { color: var(--text); font-weight: 600; }
   .modal-topo { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
   .modal-topo h2 { font-size: 16px; margin: 0; }
   .modal-fechar { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; line-height: 1; }
@@ -217,7 +223,9 @@
       <h2>Credenciais</h2>
       <button type="button" class="modal-fechar" id="botao-fechar-modal">&times;</button>
     </div>
-    <p class="sub" style="margin-top:4px">Salvar aqui cria (ou atualiza) o cliente.</p>
+    <p class="sub" style="margin-top:4px" id="modal-subtitulo">Salvar aqui cria o agente deste cliente no n8n.</p>
+
+    <div class="aviso-existente" id="aviso-existente" style="display:none"></div>
 
     <form id="form-credenciais">
       <fieldset>
@@ -234,6 +242,11 @@
         <input type="password" id="openai_api_key" required placeholder="sk-...">
         <small class="hint">A credencial é criada no n8n na hora, com o nome "{cliente} Key OpenIA" — não precisa existir antes.</small>
       </fieldset>
+
+      <div class="linha" id="linha-forcar-novo" style="display:none">
+        <input type="checkbox" id="forcar_novo">
+        <label for="forcar_novo">Criar um agente NOVO em vez de atualizar o que já existe</label>
+      </div>
 
       <div class="linha">
         <input type="checkbox" id="dry_run" checked>
@@ -558,9 +571,67 @@ document.getElementById('botao-logs').addEventListener('click', () => {
   botao.classList.toggle('aberto', abrindo);
 });
 
-document.getElementById('botao-engrenagem').addEventListener('click', () => {
+async function prepararModalCredenciais() {
+  const aviso = document.getElementById('aviso-existente');
+  const linhaForcar = document.getElementById('linha-forcar-novo');
+  const subtitulo = document.getElementById('modal-subtitulo');
+  const botao = document.getElementById('botao-salvar-credenciais');
+  const checkForcar = document.getElementById('forcar_novo');
+  const checkDry = document.getElementById('dry_run');
+
+  checkForcar.checked = false;
+
+  let cliente;
+  try {
+    cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
+  } catch (e) {
+    return;
+  }
+
+  const jaTemAgente = cliente.status === 'clonado' && cliente.workflow_novo_id;
+
+  if (!jaTemAgente) {
+    aviso.style.display = 'none';
+    linhaForcar.style.display = 'none';
+    subtitulo.textContent = 'Salvar aqui cria o agente deste cliente no n8n.';
+    atualizarRotuloBotaoCredenciais();
+    return;
+  }
+
+  aviso.style.display = 'block';
+  aviso.innerHTML = `
+    <strong>Este cliente já tem um agente no n8n.</strong><br>
+    <a href="${cliente.workflow_novo_url}" target="_blank">${escaparHtml(cliente.workflow_novo_id)}</a> — em funcionamento.
+    Salvar aqui vai <strong>atualizar as credenciais dele</strong>, sem criar nada novo.`;
+  linhaForcar.style.display = 'flex';
+  subtitulo.textContent = 'Atualize as credenciais do agente existente, ou marque abaixo pra criar outro.';
+  atualizarRotuloBotaoCredenciais();
+
+  // O dry-run não se aplica à atualização (ela não cria nada) — só volta a
+  // fazer sentido se a pessoa escolher criar um agente novo.
+  checkDry.closest('.linha').style.display = checkForcar.checked ? 'flex' : 'none';
+}
+
+function atualizarRotuloBotaoCredenciais() {
+  const botao = document.getElementById('botao-salvar-credenciais');
+  const linhaForcar = document.getElementById('linha-forcar-novo');
+  const forcar = document.getElementById('forcar_novo').checked;
+  const temAgente = linhaForcar.style.display !== 'none';
+
+  if (!temAgente) botao.textContent = 'Salvar e clonar';
+  else if (forcar) botao.textContent = 'Criar agente novo';
+  else botao.textContent = 'Atualizar credenciais';
+}
+
+document.getElementById('forcar_novo').addEventListener('change', (ev) => {
+  atualizarRotuloBotaoCredenciais();
+  document.getElementById('dry_run').closest('.linha').style.display = ev.target.checked ? 'flex' : 'none';
+});
+
+document.getElementById('botao-engrenagem').addEventListener('click', async () => {
   document.getElementById('resultado-credenciais').innerHTML = '';
   modalEngrenagem.style.display = 'flex';
+  await prepararModalCredenciais();
 });
 document.getElementById('botao-fechar-modal').addEventListener('click', () => {
   modalEngrenagem.style.display = 'none';
@@ -574,9 +645,16 @@ function renderizarResultadoCredenciais(resultado, ok) {
     return;
   }
 
-  const mensagem = resultado.dry_run
-    ? 'Simulação concluída — nada foi criado no n8n. Detalhes nos logs.'
-    : 'Cliente clonado. Detalhes nos logs.';
+  let mensagem;
+  if (resultado.dry_run) {
+    mensagem = 'Simulação concluída — nada foi criado no n8n. Detalhes nos logs.';
+  } else if (resultado.atualizado) {
+    mensagem = resultado.campos_alterados && resultado.campos_alterados.length
+      ? `Credenciais atualizadas no agente existente (${resultado.campos_alterados.join(', ')}).`
+      : 'Nada a atualizar — as credenciais enviadas já são as que estão no agente.';
+  } else {
+    mensagem = 'Agente criado no n8n. Detalhes nos logs.';
+  }
   div.innerHTML = `<div class="card ok">${mensagem}</div>`;
 }
 
@@ -592,6 +670,7 @@ document.getElementById('form-credenciais').addEventListener('submit', async (ev
     kommo_token: document.getElementById('kommo_token').value,
     openai_api_key: document.getElementById('openai_api_key').value,
     dry_run: document.getElementById('dry_run').checked,
+    forcar_novo: document.getElementById('forcar_novo').checked,
   };
 
   try {
