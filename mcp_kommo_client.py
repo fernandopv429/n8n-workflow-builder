@@ -11,6 +11,7 @@ PARÂMETRO da chamada (é multi-tenant por design) — nada fixo aqui, quem cham
 (agente_chat.py) passa o domínio/token do cliente atual em cada chamada.
 """
 import asyncio
+import json
 import pathlib
 import sys
 
@@ -57,6 +58,47 @@ def chamar_ferramenta(nome: str, argumentos: dict) -> str:
     """Abre uma sessão MCP nova por chamada — simples e robusto (o custo de
     reabrir a conexão a cada tool-call é aceitável pro volume de um chat)."""
     return asyncio.run(_chamar_ferramenta_async(nome, argumentos))
+
+
+def validar_credenciais(subdominio: str, token: str) -> dict:
+    """Confere se subdomínio+token do Kommo realmente funcionam, listando os
+    funis (só leitura, não altera nada na conta).
+
+    Sem isso um token errado só aparece quando um paciente manda mensagem e o
+    agente falha calado — o painel diria "clonado com sucesso" do mesmo jeito.
+
+    Formatos observados no MCP em 21/09/2026:
+        erro    -> {"error": {"message": "...", "name": "NodeApiError"}}
+        sucesso -> [{"data": "<string JSON com _embedded.pipelines>"}]
+    """
+    dominio = f"{subdominio}.kommo.com"
+    try:
+        bruto = chamar_ferramenta(
+            "kommo_listar_funis", {"kommo_domain": dominio, "access_token": token}
+        )
+    except Exception as e:  # noqa: BLE001 — MCP fora do ar / rede
+        return {"ok": False, "mensagem": f"não consegui falar com o MCP do Kommo: {e}", "funis": None}
+
+    try:
+        dados = json.loads(bruto)
+    except json.JSONDecodeError:
+        return {"ok": False, "mensagem": f"resposta inesperada do Kommo: {bruto[:200]}", "funis": None}
+
+    if isinstance(dados, dict) and dados.get("error"):
+        erro = dados["error"]
+        msg = erro.get("message") if isinstance(erro, dict) else str(erro)
+        return {"ok": False, "mensagem": msg or "credenciais recusadas pelo Kommo", "funis": None}
+
+    # Sucesso: conta os funis só pra dar um retorno útil ("conectado, 12 funis").
+    funis = None
+    try:
+        if isinstance(dados, list) and dados and isinstance(dados[0], dict):
+            interno = json.loads(dados[0].get("data", "{}"))
+            funis = len(interno.get("_embedded", {}).get("pipelines", []))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass  # contar é bônus — o que importa é não ter vindo erro
+
+    return {"ok": True, "mensagem": "conexão com o Kommo confirmada", "funis": funis}
 
 
 if __name__ == "__main__":

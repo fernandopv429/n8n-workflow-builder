@@ -44,6 +44,7 @@ sys.path.insert(0, str(RAIZ))
 import agente_chat  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
+import mcp_kommo_client  # noqa: E402
 import n8n_edicao  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
@@ -339,6 +340,27 @@ class Handler(BaseHTTPRequestHandler):
 
         dry_run = bool(corpo.get("dry_run", True))
         forcar_novo = bool(corpo.get("forcar_novo", False))
+
+        # Conexão com o Kommo é testada ANTES de gravar qualquer coisa: com
+        # token errado o agente é criado, o painel diz "sucesso" e a falha só
+        # aparece quando um paciente manda mensagem. Só leitura (lista funis).
+        subdominio = str(corpo.get("kommo_subdominio", "")).strip()
+        token = str(corpo.get("kommo_token", "")).strip()
+        if subdominio and token:
+            checagem = mcp_kommo_client.validar_credenciais(subdominio, token)
+            if not checagem["ok"]:
+                db.registrar_log(cliente_id, "erro", f"Credenciais do Kommo recusadas: {checagem['mensagem']}")
+                self._responder_json(400, {
+                    "error": f"Kommo recusou a conexão: {checagem['mensagem']}",
+                    "kommo_invalido": True,
+                })
+                return
+            funis = checagem.get("funis")
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Conexão com o Kommo '{subdominio}' confirmada"
+                + (f" ({funis} funis na conta)." if funis is not None else "."),
+            )
 
         # Cliente já clonado: por padrão ATUALIZA o workflow existente em vez de
         # clonar de novo. Sem isso, clicar "Salvar e clonar" duas vezes cria um
