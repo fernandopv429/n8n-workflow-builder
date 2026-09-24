@@ -69,6 +69,7 @@ ROTA_CLIENTE_LOGS = re.compile(r"^/clientes/(\d+)/logs$")
 ROTA_CLIENTE_CREDENCIAIS = re.compile(r"^/clientes/(\d+)/credenciais$")
 ROTA_CLIENTE_MENSAGENS = re.compile(r"^/clientes/(\d+)/mensagens$")
 ROTA_CLIENTE_CHAT = re.compile(r"^/clientes/(\d+)/chat$")
+ROTA_CLIENTE_APLICAR_PROMPT = re.compile(r"^/clientes/(\d+)/aplicar-prompt$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -212,6 +213,11 @@ class Handler(BaseHTTPRequestHandler):
             self._chat(int(m.group(1)))
             return
 
+        m = ROTA_CLIENTE_APLICAR_PROMPT.match(self.path)
+        if m:
+            self._aplicar_prompt_sugerido(int(m.group(1)))
+            return
+
         if self.path != "/clientes":
             self._responder_json(404, {"error": "não encontrado"})
             return
@@ -290,6 +296,31 @@ class Handler(BaseHTTPRequestHandler):
             "atualizado": True,
             "campos_alterados": alterados,
         })
+
+    def _aplicar_prompt_sugerido(self, cliente_id: int):
+        """Aplica no agente o prompt vindo do briefing. Necessário quando o
+        lote da Batch API só termina DEPOIS da clonagem — nesse caso o agente
+        subiu com a persona do template e precisa ser corrigido."""
+        cliente = db.obter_cliente(cliente_id)
+        if cliente is None:
+            self._responder_json(404, {"error": "cliente não encontrado"})
+            return
+        if not cliente.get("prompt_sugerido"):
+            self._responder_json(400, {"error": "não há prompt gerado a partir de briefing pra este cliente"})
+            return
+        if not cliente.get("workflow_novo_id"):
+            self._responder_json(400, {"error": "o agente ainda não foi criado no n8n"})
+            return
+
+        try:
+            r = n8n_edicao.atualizar_prompt_agente(cliente["workflow_novo_id"], cliente["prompt_sugerido"])
+        except Exception as e:  # noqa: BLE001
+            db.registrar_log(cliente_id, "erro", f"Falha ao aplicar o prompt do briefing: {e}")
+            self._responder_json(502, {"error": str(e)})
+            return
+
+        db.registrar_log(cliente_id, "sistema", f"Prompt do briefing aplicado no agente '{r['node']}'.")
+        self._responder_json(200, {"aplicado": True, "node": r["node"]})
 
     def _chat(self, cliente_id: int):
         try:
@@ -393,7 +424,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            resultado = clonar(manifesto, dry_run=dry_run)
+            # O prompt gerado a partir do briefing entra AQUI — senão o clone
+            # sobe com a persona do template (ver _aplicar_prompt no cloner).
+            resultado = clonar(manifesto, dry_run=dry_run, prompt_briefing=cliente.get("prompt_sugerido") or "")
         except ClonagemInvalida as e:
             if not dry_run:
                 db.marcar_cliente_erro(cliente_id, str(e))

@@ -24,6 +24,7 @@ import json
 import re
 import unicodedata
 
+import n8n_edicao
 from manifest import ClienteManifest
 from n8n_client import N8nClient
 
@@ -144,6 +145,28 @@ def _slug(texto: str) -> str:
     return texto.strip("-") or "cliente"
 
 
+def _aplicar_prompt(nodes: list, prompt: str, avisos: list):
+    """Troca o prompt do agente principal pelo gerado a partir do briefing.
+
+    Sem isto o clone entra no ar com a persona do TEMPLATE: o agente do
+    'Will teste' ficou respondendo como "Jaque, da Dra. Fabiana" porque o
+    prompt sugerido só era guardado no banco, nunca aplicado (21/09/2026).
+    """
+    if not prompt:
+        avisos.append(
+            "Nenhum prompt gerado a partir de briefing — o agente entra com a persona do "
+            "template. Ajuste pelo chat antes de apontar o WhatsApp do cliente pra cá."
+        )
+        return
+    try:
+        node = n8n_edicao._node_agente_principal(nodes)
+    except n8n_edicao.EdicaoInvalida as e:
+        avisos.append(f"Não consegui identificar o agente principal pra aplicar o prompt do briefing: {e}")
+        return
+    node.setdefault("parameters", {}).setdefault("options", {})["systemMessage"] = prompt
+    avisos.append(f"Prompt do briefing aplicado no agente '{node['name']}'.")
+
+
 def _escolher_path_livre(cliente_nome: str, paths_em_uso: set) -> str:
     """Um path derivado só do nome colide sempre que o nome se repete — e
     também quando uma tentativa anterior do MESMO cliente deixou workflow pra
@@ -187,7 +210,7 @@ def _payload_criacao(workflow: dict) -> dict:
     }
 
 
-def montar_previa(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> dict:
+def montar_previa(cliente_n8n: N8nClient, manifesto: ClienteManifest, prompt_briefing: str = "") -> dict:
     """Só leitura (GET) — usado pelo dry-run. NUNCA chama create_workflow.
 
     As referências de sub-workflow ficam com o id ANTIGO no payload de prévia
@@ -214,6 +237,7 @@ def montar_previa(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> dict:
     _reescrever_database(nodes, manifesto, avisos)
     _trocar_credencial_openai(nodes, manifesto, avisos)
     _garantir_webhook_unico(nodes, manifesto, avisos)
+    _aplicar_prompt(nodes, prompt_briefing, avisos)
 
     payload = {
         "name": f"Ecossistema IA - {manifesto.cliente_nome}",
@@ -253,7 +277,7 @@ def _desfazer(cliente_n8n: N8nClient, workflow_id: str, ids_subworkflows: list, 
             avisos.append(f"Não consegui remover a credencial {credencial_id} na limpeza: {e}")
 
 
-def executar_clone_real(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> dict:
+def executar_clone_real(cliente_n8n: N8nClient, manifesto: ClienteManifest, prompt_briefing: str = "") -> dict:
     """Cria de fato: credencial OpenAI, sub-workflows, workflow principal, ativa e verifica.
 
     Tudo ou nada: se qualquer passo falhar, `_desfazer` apaga o que já foi
@@ -307,6 +331,7 @@ def executar_clone_real(cliente_n8n: N8nClient, manifesto: ClienteManifest) -> d
         _reescrever_database(nodes, manifesto, avisos)
         _trocar_credencial_openai(nodes, manifesto, avisos)
         _garantir_webhook_unico(nodes, manifesto, avisos, paths_em_uso)
+        _aplicar_prompt(nodes, prompt_briefing, avisos)
 
         payload = {
             "name": f"Ecossistema IA - {manifesto.cliente_nome}",
@@ -377,14 +402,14 @@ def _verificar_clone(cliente_n8n: N8nClient, workflow_id: str, manifesto: Client
         )
 
 
-def clonar(manifesto: ClienteManifest, dry_run: bool = True) -> dict:
+def clonar(manifesto: ClienteManifest, dry_run: bool = True, prompt_briefing: str = "") -> dict:
     """Ponto de entrada único. dry_run=True (padrão) NUNCA chama create_workflow —
     só leitura. dry_run=False executa a clonagem de verdade."""
     manifesto.validar()
     cliente_n8n = N8nClient()
     if dry_run:
-        return montar_previa(cliente_n8n, manifesto)
-    return executar_clone_real(cliente_n8n, manifesto)
+        return montar_previa(cliente_n8n, manifesto, prompt_briefing)
+    return executar_clone_real(cliente_n8n, manifesto, prompt_briefing)
 
 
 if __name__ == "__main__":

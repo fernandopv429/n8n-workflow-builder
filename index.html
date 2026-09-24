@@ -323,10 +323,29 @@ async function carregarBriefing() {
     const estrutura = cliente.estrutura_kommo_sugerida
       ? JSON.stringify(cliente.estrutura_kommo_sugerida, null, 2)
       : '(não gerado)';
+    const podeAplicar = cliente.prompt_sugerido && cliente.workflow_novo_id;
     caixa.innerHTML = `
-      <div class="briefing-titulo">Sugestão gerada via Batch API — revise antes de aplicar</div>
-      <details><summary>Prompt sugerido</summary><div class="briefing-conteudo">${escaparHtml(cliente.prompt_sugerido || '(não gerado)')}</div></details>
-      <details><summary>Estrutura de Kommo sugerida</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>`;
+      <div class="briefing-titulo">Gerado a partir do briefing</div>
+      <details><summary>Prompt do agente</summary><div class="briefing-conteudo">${escaparHtml(cliente.prompt_sugerido || '(não gerado)')}</div></details>
+      <details><summary>Estrutura de Kommo sugerida (ainda NÃO aplicada — peça no chat)</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>
+      ${podeAplicar ? '<button type="button" class="principal" id="botao-aplicar-prompt" style="margin-top:12px">Aplicar este prompt no agente</button>' : ''}`;
+
+    if (podeAplicar) {
+      document.getElementById('botao-aplicar-prompt').addEventListener('click', async (ev) => {
+        const b = ev.target;
+        b.disabled = true; b.textContent = 'Aplicando...';
+        try {
+          const resp = await fetch(`/clientes/${clienteAtualId}/aplicar-prompt`, { method: 'POST' });
+          const corpo = await resp.json();
+          b.textContent = resp.ok ? `Aplicado no agente "${corpo.node}"` : `Erro: ${corpo.error}`;
+          await carregarLogs();
+        } catch (e) {
+          b.textContent = 'Erro: ' + e;
+        } finally {
+          b.disabled = false;
+        }
+      });
+    }
   } else if (['failed', 'expired', 'cancelled'].includes(cliente.batch_status)) {
     caixa.innerHTML = `<div class="briefing-titulo">Batch API não concluiu (status: ${cliente.batch_status})</div>`;
   } else {

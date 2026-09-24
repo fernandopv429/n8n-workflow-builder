@@ -8,6 +8,7 @@ import json
 import pathlib
 
 from cloner import (
+    _aplicar_prompt,
     _garantir_webhook_unico,
     _reescrever_database,
     _reescrever_referencias_subworkflow,
@@ -176,6 +177,32 @@ def teste_path_desvia_de_path_ja_em_uso():
     assert node_webhook["webhookId"] == "ecossistema-ia-will-teste-2"
 
 
+def teste_aplica_prompt_do_briefing_no_agente():
+    """Armadilha real (21/09/2026): o prompt gerado pelo briefing era salvo no
+    banco mas nunca aplicado — o agente do 'Will teste' subiu respondendo como
+    "Jaque, da Dra. Fabiana", a persona do template."""
+    d = carregar("fabifisio__Jv3y1QjnT84AHywf.json")
+    nodes = copy.deepcopy(d["nodes"])
+    agente = _node_agente_principal(nodes)
+    prompt_do_template = agente["parameters"]["options"]["systemMessage"]
+    assert "Jaque" in prompt_do_template, "fixture mudou — esperava a persona do template aqui"
+
+    _aplicar_prompt(nodes, "Você é Bia, atendente da Clínica Nova.", [])
+
+    agente = _node_agente_principal(nodes)
+    aplicado = agente["parameters"]["options"]["systemMessage"]
+    assert aplicado == "Você é Bia, atendente da Clínica Nova."
+    assert "Jaque" not in aplicado, "sobrou a persona do template"
+
+
+def teste_sem_briefing_avisa_que_ficou_com_persona_do_template():
+    d = carregar("fabifisio__Jv3y1QjnT84AHywf.json")
+    nodes = copy.deepcopy(d["nodes"])
+    avisos = []
+    _aplicar_prompt(nodes, "", avisos)
+    assert any("persona do template" in a for a in avisos), avisos
+
+
 def teste_identifica_agente_principal_por_nao_ser_agentemov():
     """n8n_edicao: o agente principal é sempre o node tipo agent que NÃO se
     chama 'AgenteMov' — testado contra os 4 clientes reais, personas diferentes
@@ -266,6 +293,8 @@ TESTES = [
     teste_database_sem_campos_evolution_nao_bloqueia,
     teste_garante_webhook_unico,
     teste_path_desvia_de_path_ja_em_uso,
+    teste_aplica_prompt_do_briefing_no_agente,
+    teste_sem_briefing_avisa_que_ficou_com_persona_do_template,
     teste_identifica_agente_principal_por_nao_ser_agentemov,
     teste_acha_node_database_nos_4_clientes,
     teste_renomear_node_atualiza_expressoes,
