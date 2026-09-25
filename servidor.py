@@ -46,6 +46,7 @@ import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import n8n_edicao  # noqa: E402
+import pocketbase_client  # noqa: E402
 import cloner  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
@@ -71,6 +72,18 @@ ROTA_CLIENTE_CREDENCIAIS = re.compile(r"^/clientes/(\d+)/credenciais$")
 ROTA_CLIENTE_MENSAGENS = re.compile(r"^/clientes/(\d+)/mensagens$")
 ROTA_CLIENTE_CHAT = re.compile(r"^/clientes/(\d+)/chat$")
 ROTA_CLIENTE_APLICAR_PROMPT = re.compile(r"^/clientes/(\d+)/aplicar-prompt$")
+ROTA_CLIENTE_IMAGEM = re.compile(r"^/clientes/(\d+)/imagem$")
+
+
+def _com_imagem(cliente: dict) -> dict:
+    """Acrescenta a URL pública da imagem. Fica aqui, e não no db.py, porque
+    montar a URL depende do PocketBase — o banco só guarda o vínculo."""
+    if not cliente:
+        return cliente
+    cliente["imagem_url"] = pocketbase_client.url_publica(
+        cliente.get("imagem_pb_record_id"), cliente.get("imagem_pb_filename")
+    )
+    return cliente
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -160,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(200, {"nichos": NICHOS, "origens": db.listar_templates_nicho()})
             return
         if self.path == "/clientes":
-            self._responder_json(200, {"clientes": db.listar_clientes()})
+            self._responder_json(200, {"clientes": [_com_imagem(c) for c in db.listar_clientes()]})
             return
 
         m = ROTA_CLIENTE_LOGS.match(self.path)
@@ -189,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if cliente["batch_status"] == "in_progress":
                 cliente = self._checar_batch(cliente_id, cliente)
-            self._responder_json(200, cliente)
+            self._responder_json(200, _com_imagem(cliente))
             return
 
         self._responder_json(404, {"error": "não encontrado"})
@@ -226,6 +239,11 @@ class Handler(BaseHTTPRequestHandler):
             self._aplicar_prompt_sugerido(int(m.group(1)))
             return
 
+        m = ROTA_CLIENTE_IMAGEM.match(self.path)
+        if m:
+            self._enviar_imagem(int(m.group(1)))
+            return
+
         if self.path != "/clientes":
             self._responder_json(404, {"error": "não encontrado"})
             return
@@ -256,7 +274,7 @@ class Handler(BaseHTTPRequestHandler):
         # Agora é feito pelo chat, depois das credenciais — com a opção de ir
         # pela Batch API lá mesmo.
         cliente_id = db.criar_cliente_rascunho(cliente_nome, nicho, workflow_origem_id)
-        self._responder_json(200, db.obter_cliente(cliente_id))
+        self._responder_json(200, _com_imagem(db.obter_cliente(cliente_id)))
 
     def _atualizar_cliente_clonado(self, cliente_id: int, cliente: dict, corpo: dict):
         """Atualiza as credenciais do Kommo no workflow que já existe. A chave da
@@ -311,6 +329,54 @@ class Handler(BaseHTTPRequestHandler):
 
         db.registrar_log(cliente_id, "sistema", f"Prompt do briefing aplicado no agente '{r['node']}'.")
         self._responder_json(200, {"aplicado": True, "node": r["node"]})
+
+    def _enviar_imagem(self, cliente_id: int):
+        """Recebe a imagem em base64 num JSON — evita ter que fazer o parse de
+        multipart aqui (o módulo `cgi`, que faria isso, saiu do Python 3.13).
+        O upload pro PocketBase é que monta o multipart."""
+        cliente = db.obter_cliente(cliente_id)
+        if cliente is None:
+            self._responder_json(404, {"error": "cliente não encontrado"})
+            return
+        if not pocketbase_client.configurado():
+            self._responder_json(503, {"error": "PocketBase não configurado (ver POCKETBASE_* no ambiente)"})
+            return
+
+        try:
+            corpo = self._ler_corpo()
+        except json.JSONDecodeError:
+            self._responder_json(400, {"error": "JSON inválido"})
+            return
+
+        nome = str(corpo.get("nome_arquivo", "imagem.png")).strip() or "imagem.png"
+        try:
+            conteudo = base64.b64decode(str(corpo.get("conteudo_base64", "")), validate=True)
+        except Exception:  # noqa: BLE001
+            self._responder_json(400, {"error": "conteudo_base64 inválido"})
+            return
+        if not conteudo:
+            self._responder_json(400, {"error": "imagem vazia"})
+            return
+
+        anterior = cliente.get("imagem_pb_record_id")
+        try:
+            r = pocketbase_client.enviar_imagem(cliente_id, nome, conteudo)
+        except pocketbase_client.PocketBaseError as e:
+            db.registrar_log(cliente_id, "erro", f"Falha ao enviar imagem: {e}")
+            self._responder_json(502, {"error": str(e)})
+            return
+
+        db.definir_imagem(cliente_id, r["record_id"], r["filename"])
+        # A troca só apaga a antiga DEPOIS que a nova entrou — se a remoção
+        # falhar, sobra um arquivo órfão, o que é melhor que ficar sem imagem.
+        if anterior:
+            try:
+                pocketbase_client.remover_imagem(anterior)
+            except pocketbase_client.PocketBaseError as e:
+                db.registrar_log(cliente_id, "erro", f"Imagem trocada, mas a anterior ficou no PocketBase: {e}")
+
+        db.registrar_log(cliente_id, "sistema", "Imagem do cliente atualizada.")
+        self._responder_json(200, {"imagem_url": r["url"]})
 
     def _chat(self, cliente_id: int):
         try:
@@ -375,6 +441,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 — n8n fora do ar não deve travar a remoção no painel
                 relatorio = [f"falha ao limpar no n8n: {e}"]
                 sys.stderr.write(f"[servidor] {relatorio[0]}\n")
+
+        if cliente.get("imagem_pb_record_id"):
+            try:
+                pocketbase_client.remover_imagem(cliente["imagem_pb_record_id"])
+                relatorio.append("imagem removida do PocketBase")
+            except Exception as e:  # noqa: BLE001
+                relatorio.append(f"imagem ficou no PocketBase: {e}")
 
         db.remover_cliente(cliente_id)
         self._responder_json(200, {

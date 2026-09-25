@@ -50,6 +50,10 @@ def garantir_schema():
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS batch_status TEXT")
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_sugerido TEXT")
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS estrutura_kommo_sugerida JSONB")
+        # Imagem do card: o arquivo vive no PocketBase compartilhado, aqui fica
+        # só o vínculo (mesmo padrão do cadastro-veiculos).
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS imagem_pb_record_id TEXT")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS imagem_pb_filename TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -182,6 +186,8 @@ def _linha_para_cliente(r) -> dict:
         "batch_status": r[9],
         "prompt_sugerido": r[10],
         "estrutura_kommo_sugerida": r[11],
+        "imagem_pb_record_id": r[12],
+        "imagem_pb_filename": r[13],
     }
 
 
@@ -191,7 +197,8 @@ def obter_cliente(cliente_id: int) -> dict | None:
             """
             SELECT id, cliente_nome, nicho, workflow_origem_id, status,
                    workflow_novo_id, workflow_novo_url, criado_em,
-                   batch_id, batch_status, prompt_sugerido, estrutura_kommo_sugerida
+                   batch_id, batch_status, prompt_sugerido, estrutura_kommo_sugerida,
+                   imagem_pb_record_id, imagem_pb_filename
             FROM clientes WHERE id = %s
             """,
             (cliente_id,),
@@ -219,7 +226,8 @@ def listar_clientes() -> list:
             """
             SELECT id, cliente_nome, nicho, workflow_origem_id, status,
                    workflow_novo_id, workflow_novo_url, criado_em,
-                   batch_id, batch_status, prompt_sugerido, estrutura_kommo_sugerida
+                   batch_id, batch_status, prompt_sugerido, estrutura_kommo_sugerida,
+                   imagem_pb_record_id, imagem_pb_filename
             FROM clientes
             ORDER BY criado_em DESC
             """
@@ -327,6 +335,14 @@ def remover_cliente(cliente_id: int):
         conn.execute("DELETE FROM chat_mensagens WHERE cliente_id = %s", (cliente_id,))
         conn.execute("DELETE FROM logs WHERE cliente_id = %s", (cliente_id,))
         conn.execute("DELETE FROM clientes WHERE id = %s", (cliente_id,))
+
+
+def definir_imagem(cliente_id: int, record_id: str, filename: str):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET imagem_pb_record_id = %s, imagem_pb_filename = %s, atualizado_em = now() WHERE id = %s",
+            (record_id or None, filename or None, cliente_id),
+        )
 
 
 def registrar_lote_chat(cliente_id: int, batch_id: str, pergunta: str):

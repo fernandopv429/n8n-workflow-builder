@@ -35,6 +35,23 @@
   }
   .cliente-card:hover { border-color: var(--accent); }
   .cliente-card-wrap { position: relative; }
+  .card-imagem {
+    width: 100%; height: 90px; object-fit: cover; border-radius: 6px;
+    margin-bottom: 10px; display: block; background: #000;
+  }
+  .card-imagem-vazia {
+    width: 100%; height: 90px; border-radius: 6px; margin-bottom: 10px;
+    border: 1px dashed var(--border); display: flex; align-items: center;
+    justify-content: center; color: var(--muted); font-size: 11px;
+  }
+  .imagem-card {
+    position: absolute; top: 8px; right: 36px; width: 24px; height: 24px;
+    border: none; border-radius: 6px; background: none; color: var(--muted);
+    font-size: 13px; line-height: 1; cursor: pointer; padding: 0; opacity: 0;
+    transition: opacity .15s;
+  }
+  .cliente-card-wrap:hover .imagem-card { opacity: 1; }
+  .imagem-card:hover { color: var(--text); background: var(--card); }
   .excluir-card {
     position: absolute; top: 8px; right: 8px; width: 24px; height: 24px;
     border: none; border-radius: 6px; background: none; color: var(--muted);
@@ -406,12 +423,26 @@ async function carregarClientes() {
     el.type = 'button';
     el.className = 'cliente-card';
     const data = new Date(c.criado_em).toLocaleDateString('pt-BR');
+    const imagem = c.imagem_url
+      ? `<img class="card-imagem" src="${escaparHtml(c.imagem_url)}" alt="">`
+      : '<div class="card-imagem-vazia">sem imagem</div>';
     el.innerHTML = `
+      ${imagem}
       <h3>${escaparHtml(c.cliente_nome)}</h3>
       <div class="nicho">${escaparHtml(c.nicho)}</div>
       <div class="status ${c.status}">${c.status}</div>
       <div class="data" style="margin-top:6px">criado em ${data}</div>`;
     el.addEventListener('click', () => abrirGerenciamento(c.id));
+
+    const trocarImagem = document.createElement('button');
+    trocarImagem.type = 'button';
+    trocarImagem.className = 'imagem-card';
+    trocarImagem.title = c.imagem_url ? 'Trocar imagem' : 'Adicionar imagem';
+    trocarImagem.textContent = '🖼';
+    trocarImagem.addEventListener('click', (ev) => {
+      ev.stopPropagation();  // senão abriria o cliente junto
+      escolherImagem(c.id);
+    });
 
     const excluir = document.createElement('button');
     excluir.type = 'button';
@@ -423,7 +454,10 @@ async function carregarClientes() {
       abrirConfirmacaoExclusao(c);
     });
 
+    // os botões entram DEPOIS do card: são absolutos sem z-index, então quem
+    // vem por último no DOM fica por cima e recebe o clique
     wrap.appendChild(el);
+    wrap.appendChild(trocarImagem);
     wrap.appendChild(excluir);
     grid.appendChild(wrap);
   }
@@ -435,6 +469,45 @@ async function carregarClientes() {
     vazio.textContent = 'Nenhum cliente clonado ainda.';
     grid.prepend(vazio);
   }
+}
+
+const LIMITE_IMAGEM = 5 * 1024 * 1024;  // mesmo teto do PocketBase
+
+function escolherImagem(clienteId) {
+  const entrada = document.createElement('input');
+  entrada.type = 'file';
+  entrada.accept = 'image/png,image/jpeg,image/webp,image/gif';
+  entrada.addEventListener('change', async () => {
+    const arquivo = entrada.files[0];
+    if (!arquivo) return;
+    if (arquivo.size > LIMITE_IMAGEM) {
+      alert(`Imagem tem ${Math.round(arquivo.size / 1024)} KB — o limite é ${LIMITE_IMAGEM / 1024} KB.`);
+      return;
+    }
+    try {
+      // manda em base64 no JSON: o backend não faz parse de multipart
+      const base64 = await new Promise((ok, falha) => {
+        const leitor = new FileReader();
+        leitor.onload = () => ok(leitor.result.split(',')[1]);
+        leitor.onerror = () => falha(leitor.error);
+        leitor.readAsDataURL(arquivo);
+      });
+      const resp = await fetch(`/clientes/${clienteId}/imagem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nome_arquivo: arquivo.name, conteudo_base64: base64 }),
+      });
+      const corpo = await resp.json();
+      if (!resp.ok) {
+        alert(corpo.error || 'falha ao enviar a imagem');
+        return;
+      }
+      await carregarClientes();
+    } catch (e) {
+      alert('Falha ao enviar a imagem: ' + e);
+    }
+  });
+  entrada.click();
 }
 
 let clienteParaExcluir = null;

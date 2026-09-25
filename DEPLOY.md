@@ -27,6 +27,9 @@ e em `~/Área de trabalho/Conexão_geral/CREDENCIAIS.md`.
 | `DATABASE_URL` | Postgres do estado (clientes/chat/logs) | **sim** |
 | `OPENAI_API_KEY` | chat do painel e geração a partir do briefing | **sim** |
 | `AGENTOPS_API_KEY` | rastreio das chamadas de IA | não |
+| `POCKETBASE_URL` | `https://db.a5ecossistema.tech` | só p/ imagem |
+| `POCKETBASE_ADMIN_EMAIL` | superusuário do PocketBase | só p/ imagem |
+| `POCKETBASE_ADMIN_PASSWORD` | senha desse superusuário | só p/ imagem |
 | `PORT` | o Coolify costuma injetar; padrão `8099` | não |
 
 **Sem `PAINEL_SENHA` o painel responde 401 em tudo.** É de propósito — falha
@@ -57,6 +60,14 @@ curl -s https://SEU-DOMINIO/saude
 curl -s -o /dev/null -w '%{http_code}\n' https://SEU-DOMINIO/          # 401
 curl -s -o /dev/null -w '%{http_code}\n' -u admin:SENHA https://SEU-DOMINIO/  # 200
 ```
+
+## Imagem dos cards
+
+Cada cliente pode ter uma imagem, guardada no PocketBase compartilhado da A5
+(`db.a5ecossistema.tech`, coleção `painel_agentes_imagens` — um registro por
+imagem, leitura pública, escrita só com superusuário). O Postgres guarda só o
+vínculo (`clientes.imagem_pb_record_id`/`imagem_pb_filename`). Sem as
+variáveis `POCKETBASE_*`, o painel funciona normal e o upload responde 503.
 
 ## O que ficou de fora da imagem
 
