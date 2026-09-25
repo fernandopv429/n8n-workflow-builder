@@ -169,7 +169,14 @@ class Handler(BaseHTTPRequestHandler):
 
         m = ROTA_CLIENTE_MENSAGENS.match(self.path)
         if m:
-            self._responder_json(200, {"mensagens": db.listar_mensagens(int(m.group(1)))})
+            cliente_id = int(m.group(1))
+            # Poll-on-read: sem worker em segundo plano, a resposta de um lote
+            # só é buscada quando alguém reabre a conversa.
+            try:
+                agente_chat.buscar_respostas_em_lote(cliente_id)
+            except Exception as e:  # noqa: BLE001 — não impede de mostrar o histórico
+                sys.stderr.write(f"[servidor] falha ao checar lotes do chat: {e}\n")
+            self._responder_json(200, {"mensagens": db.listar_mensagens(cliente_id)})
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)
@@ -243,29 +250,11 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(400, {"error": "workflow_origem_id não corresponde ao template cadastrado desse nicho"})
             return
 
-        briefing = str(corpo.get("briefing", "")).strip()
-        resposta_rapida = bool(corpo.get("resposta_rapida", False))
-
-        batch_id = ""
-        resultado_sincrono = None
-        if briefing:
-            try:
-                if resposta_rapida:
-                    resultado_sincrono = briefing_batch.processar_briefing_sincrono(nicho, cliente_nome, briefing)
-                else:
-                    batch_id = briefing_batch.submeter_briefing(nicho, cliente_nome, briefing)
-            except Exception as e:  # noqa: BLE001 — devolve pro form em vez de criar cliente sem o que foi pedido
-                self._responder_json(502, {"error": f"falha ao gerar a partir do briefing: {e}"})
-                return
-
-        cliente_id = db.criar_cliente_rascunho(cliente_nome, nicho, workflow_origem_id, briefing, batch_id)
-
-        if resultado_sincrono:
-            db.atualizar_resultado_batch(
-                cliente_id, "completed",
-                resultado_sincrono.get("prompt_agente"), resultado_sincrono.get("estrutura_kommo"),
-            )
-
+        # O briefing saiu daqui (25/09/2026): gerado neste passo, ele não tinha
+        # credencial do Kommo pra consultar e a proposta de funil saía às cegas.
+        # Agora é feito pelo chat, depois das credenciais — com a opção de ir
+        # pela Batch API lá mesmo.
+        cliente_id = db.criar_cliente_rascunho(cliente_nome, nicho, workflow_origem_id)
         self._responder_json(200, db.obter_cliente(cliente_id))
 
     def _atualizar_cliente_clonado(self, cliente_id: int, cliente: dict, corpo: dict):
@@ -332,6 +321,19 @@ class Handler(BaseHTTPRequestHandler):
         texto = str(corpo.get("mensagem", "")).strip()
         if not texto:
             self._responder_json(400, {"error": "mensagem é obrigatória"})
+            return
+
+        if bool(corpo.get("em_lote", False)):
+            try:
+                batch_id = agente_chat.enviar_em_lote(cliente_id, texto)
+            except ValueError as e:
+                self._responder_json(400, {"error": str(e)})
+                return
+            except Exception as e:  # noqa: BLE001
+                db.registrar_log(cliente_id, "erro", f"Falha ao enviar pela Batch API: {e}")
+                self._responder_json(502, {"error": f"falha ao enviar pra Batch API: {e}"})
+                return
+            self._responder_json(200, {"em_lote": True, "batch_id": batch_id})
             return
 
         try:

@@ -130,7 +130,9 @@
   .msg.user { align-self: flex-end; background: var(--card); color: var(--text); }
   .msg.assistant { align-self: flex-start; border: 1px solid var(--border); color: var(--text); }
   .msg.pensando { align-self: flex-start; color: var(--muted); font-style: italic; }
-  .chat-input-barra { display: flex; gap: 8px; margin-top: 12px; flex: 0 0 auto; }
+  .chat-opcao-lote { flex: 0 0 auto; margin-top: 12px; }
+  .chat-opcao-lote label { font-size: 12px; color: var(--muted); }
+  .chat-input-barra { display: flex; gap: 8px; margin-top: 8px; flex: 0 0 auto; }
   .chat-input-barra input { flex: 1; }
   .chat-input-barra button {
     padding: 9px 18px; border-radius: 7px; border: 1px solid var(--border);
@@ -182,14 +184,8 @@
     </fieldset>
 
     <fieldset>
-      <legend>Briefing (opcional)</legend>
-      <label for="briefing">Cole aqui funis desejados, particularidades do negócio, tom do agente etc.</label>
-      <textarea id="briefing" rows="6" placeholder="Cole o briefing completo aqui — gera uma sugestão de prompt e de estrutura de funil do Kommo."></textarea>
-
-      <div class="linha">
-        <input type="checkbox" id="resposta_rapida">
-        <label for="resposta_rapida">Resposta rápida — sai na hora, custa o dobro. Sem marcar, vai pela Batch API (50% mais barato, leva de minutos a horas).</label>
-      </div>
+      <legend>Briefing</legend>
+      <small class="hint">O briefing agora é feito pelo chat, depois das credenciais — assim a proposta de funil já leva em conta a conta real do Kommo e pode ser aplicada na hora.</small>
     </fieldset>
 
     <button type="button" class="principal" id="botao-proximo">Próximo</button>
@@ -211,6 +207,10 @@
   <div class="briefing-caixa" id="briefing-caixa" style="display:none"></div>
 
   <div class="chat-area vazio" id="chat-area"></div>
+  <div class="linha chat-opcao-lote">
+    <input type="checkbox" id="chat_em_lote" disabled>
+    <label for="chat_em_lote">Enviar pela Batch API — 50% mais barato, resposta em minutos a horas. Só gera texto (prompt, proposta): não executa nada no n8n nem no Kommo.</label>
+  </div>
   <div class="chat-input-barra">
     <input type="text" id="chat-input" placeholder="Converse com o agente" disabled>
     <button type="button" id="chat-enviar" disabled>Enviar</button>
@@ -289,8 +289,6 @@ function mostrarPasso1() {
   containerEstreito.style.display = 'block';
   telaPasso1.style.display = 'block';
   document.getElementById('cliente_nome').value = '';
-  document.getElementById('briefing').value = '';
-  document.getElementById('resposta_rapida').checked = false;
   atualizarOrigemPeloNicho();
 }
 
@@ -451,17 +449,15 @@ document.getElementById('botao-proximo').addEventListener('click', async () => {
   const nicho = document.getElementById('nicho').value;
   const workflow_origem_id = document.getElementById('workflow_origem_id').value;
   if (!workflow_origem_id) return;
-  const briefing = document.getElementById('briefing').value.trim();
-  const resposta_rapida = document.getElementById('resposta_rapida').checked;
 
   const botao = document.getElementById('botao-proximo');
   botao.disabled = true;
-  botao.textContent = briefing && resposta_rapida ? 'Gerando...' : 'Criando...';
+  botao.textContent = 'Criando...';
   try {
     const resp = await fetch('/clientes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cliente_nome: cliente_nome.value.trim(), nicho, workflow_origem_id, briefing, resposta_rapida }),
+      body: JSON.stringify({ cliente_nome: cliente_nome.value.trim(), nicho, workflow_origem_id }),
     });
     const corpo = await resp.json();
     if (!resp.ok) {
@@ -511,6 +507,7 @@ function renderizarMensagens(mensagens) {
 async function carregarChat() {
   const input = document.getElementById('chat-input');
   const botao = document.getElementById('chat-enviar');
+  const emLote = document.getElementById('chat_em_lote');
   const area = document.getElementById('chat-area');
 
   const cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
@@ -519,12 +516,14 @@ async function carregarChat() {
     area.textContent = 'Configure as credenciais na engrenagem pra liberar o chat.';
     input.disabled = true;
     botao.disabled = true;
+    emLote.disabled = true;
     return;
   }
 
   input.disabled = false;
   botao.disabled = false;
-  input.placeholder = 'Converse com o agente';
+  emLote.disabled = false;
+  input.placeholder = 'Converse com o agente — cole o briefing aqui pra gerar o prompt';
 
   const { mensagens } = await (await fetch(`/clientes/${clienteAtualId}/mensagens`)).json();
   if (mensagens.length === 0) {
@@ -541,12 +540,14 @@ async function enviarMensagemChat() {
   const texto = input.value.trim();
   if (!texto) return;
 
+  const emLote = document.getElementById('chat_em_lote').checked;
   const area = document.getElementById('chat-area');
   area.classList.remove('vazio');
   const jaTinhaMensagens = area.querySelector('.msg') !== null;
   if (!jaTinhaMensagens) area.innerHTML = '';
   area.insertAdjacentHTML('beforeend', `<div class="msg user">${escaparHtml(texto)}</div>`);
-  area.insertAdjacentHTML('beforeend', '<div class="msg pensando" id="chat-pensando">pensando…</div>');
+  area.insertAdjacentHTML('beforeend',
+    `<div class="msg pensando" id="chat-pensando">${emLote ? 'enviando pra Batch API…' : 'pensando…'}</div>`);
   area.scrollTop = area.scrollHeight;
 
   input.value = '';
@@ -557,11 +558,15 @@ async function enviarMensagemChat() {
     const resp = await fetch(`/clientes/${clienteAtualId}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mensagem: texto }),
+      body: JSON.stringify({ mensagem: texto, em_lote: emLote }),
     });
     const corpo = await resp.json();
     document.getElementById('chat-pensando')?.remove();
-    if (resp.ok) {
+    if (resp.ok && corpo.em_lote) {
+      area.insertAdjacentHTML('beforeend',
+        '<div class="msg pensando">Enviado pela Batch API. A resposta chega em minutos a horas — ' +
+        'reabra este cliente depois pra ver.</div>');
+    } else if (resp.ok) {
       area.insertAdjacentHTML('beforeend', `<div class="msg assistant">${escaparHtml(corpo.resposta)}</div>`);
     } else {
       area.insertAdjacentHTML('beforeend', `<div class="msg assistant">Erro: ${escaparHtml(corpo.error)}</div>`);

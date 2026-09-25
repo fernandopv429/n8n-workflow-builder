@@ -24,6 +24,7 @@ from config import carregar_env  # noqa: E402
 import agentops  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
+import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import n8n_edicao  # noqa: E402
@@ -345,6 +346,68 @@ def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: in
         return f"erro: ferramenta desconhecida '{nome}'"
     except Exception as e:  # noqa: BLE001 — devolve pro modelo como resultado da tool, não derruba o chat
         return f"erro: {e}"
+
+
+def _contexto_conversa(cliente: dict) -> list:
+    historico = db.listar_mensagens(cliente["id"])
+    mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
+    mensagens += [
+        {"role": m["role"], "content": m["conteudo"]}
+        for m in historico if m["role"] in ("user", "assistant")
+    ]
+    return mensagens
+
+
+def enviar_em_lote(cliente_id: int, texto_usuario: str) -> str:
+    """Manda a mensagem pela Batch API em vez de responder na hora: 50% mais
+    barato, resposta em minutos a horas. Serve pra pedido de GERAÇÃO (escreva
+    o prompt, proponha a estrutura do funil) — sem ferramentas, então não
+    executa nada no n8n nem no Kommo. Devolve o batch_id."""
+    cliente = db.obter_cliente(cliente_id)
+    if cliente is None:
+        raise ValueError("cliente não encontrado")
+    if cliente["status"] != "clonado":
+        raise ValueError("cliente ainda não foi clonado — configure as credenciais primeiro")
+
+    db.salvar_mensagem(cliente_id, "user", texto_usuario)
+    mensagens = _contexto_conversa(cliente)
+    mensagens.append({
+        "role": "system",
+        "content": (
+            "Este pedido veio em MODO LOTE: você não tem ferramentas disponíveis "
+            "nesta resposta. Produza o texto pedido (prompt, proposta, análise). "
+            "Se o pedido exigir executar algo no n8n ou no Kommo, diga que isso "
+            "precisa ser pedido no modo normal do chat."
+        ),
+    })
+
+    batch_id = briefing_batch.submeter_conversa(mensagens)
+    db.registrar_lote_chat(cliente_id, batch_id, texto_usuario)
+    db.registrar_log(cliente_id, "sistema", f"Mensagem enviada pela Batch API (lote {batch_id}).")
+    return batch_id
+
+
+def buscar_respostas_em_lote(cliente_id: int) -> int:
+    """Confere os lotes pendentes deste cliente e grava as respostas que já
+    ficaram prontas. Devolve quantas chegaram."""
+    chegaram = 0
+    for lote in db.listar_lotes_chat_pendentes(cliente_id):
+        try:
+            r = briefing_batch.verificar_conversa(lote["batch_id"])
+        except Exception as e:  # noqa: BLE001
+            db.registrar_log(cliente_id, "erro", f"Falha ao checar lote {lote['batch_id']}: {e}")
+            continue
+
+        if r["status"] == "completed":
+            db.salvar_mensagem(cliente_id, "assistant", r["resposta"] or "(lote concluído sem resposta)")
+            db.encerrar_lote_chat(lote["id"], "completed")
+            db.registrar_log(cliente_id, "sistema", f"Resposta do lote {lote['batch_id']} recebida.")
+            chegaram += 1
+        elif r["status"] in ("failed", "expired", "cancelled"):
+            db.salvar_mensagem(cliente_id, "assistant", f"(o lote não concluiu: {r['status']})")
+            db.encerrar_lote_chat(lote["id"], r["status"])
+            chegaram += 1
+    return chegaram
 
 
 def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:

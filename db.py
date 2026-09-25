@@ -70,6 +70,19 @@ def garantir_schema():
             )
         """)
         conn.execute("""
+            -- Mensagem do chat enviada pela Batch API: a resposta chega minutos
+            -- ou horas depois, então precisa ficar registrada pra ser buscada
+            -- quando alguém reabrir a conversa.
+            CREATE TABLE IF NOT EXISTS chat_lotes (
+                id SERIAL PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+                batch_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'in_progress',
+                pergunta TEXT NOT NULL,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute("""
             -- um template padrão por nicho (workflow do n8n usado como base pra
             -- clonar) — vive no banco pra não precisar editar código toda vez
             -- que um nicho novo ganha um cliente-modelo.
@@ -294,6 +307,31 @@ def listar_mensagens(cliente_id: int) -> list:
             (cliente_id,),
         ).fetchall()
     return [{"role": r[0], "conteudo": r[1], "criado_em": r[2].isoformat()} for r in linhas]
+
+
+def registrar_lote_chat(cliente_id: int, batch_id: str, pergunta: str):
+    with _conectar() as conn:
+        conn.execute(
+            "INSERT INTO chat_lotes (cliente_id, batch_id, pergunta) VALUES (%s, %s, %s)",
+            (cliente_id, batch_id, pergunta),
+        )
+
+
+def listar_lotes_chat_pendentes(cliente_id: int) -> list:
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT id, batch_id, pergunta FROM chat_lotes
+            WHERE cliente_id = %s AND status = 'in_progress' ORDER BY criado_em ASC
+            """,
+            (cliente_id,),
+        ).fetchall()
+    return [{"id": r[0], "batch_id": r[1], "pergunta": r[2]} for r in linhas]
+
+
+def encerrar_lote_chat(lote_id: int, status: str):
+    with _conectar() as conn:
+        conn.execute("UPDATE chat_lotes SET status = %s WHERE id = %s", (status, lote_id))
 
 
 if __name__ == "__main__":

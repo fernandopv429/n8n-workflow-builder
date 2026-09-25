@@ -145,6 +145,59 @@ def submeter_briefing(nicho: str, cliente_nome: str, briefing: str) -> str:
     return lote.id
 
 
+CUSTOM_ID_CONVERSA = "conversa"
+
+
+def submeter_conversa(mensagens: list) -> str:
+    """Manda uma conversa do chat pela Batch API. Devolve o batch_id.
+
+    SEM ferramentas: a Batch API é de ida e volta única, e tool-calling precisa
+    de vários turnos (modelo pede ferramenta -> executamos -> devolvemos). Cada
+    turno viraria outro lote de horas. Então o modo lote serve pra pedido de
+    geração de texto (escrever prompt, propor estrutura), não pra ação.
+    """
+    linha = {
+        "custom_id": CUSTOM_ID_CONVERSA,
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": {"model": MODELO, "messages": mensagens, "temperature": 0.4},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+        f.write(json.dumps(linha, ensure_ascii=False) + "\n")
+        caminho = f.name
+
+    client = _cliente_openai()
+    try:
+        arquivo = client.files.create(file=open(caminho, "rb"), purpose="batch")
+        lote = client.batches.create(
+            input_file_id=arquivo.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+        )
+    finally:
+        pathlib.Path(caminho).unlink(missing_ok=True)
+    return lote.id
+
+
+def verificar_conversa(batch_id: str) -> dict:
+    """Status do lote de uma conversa. Com 'completed', devolve a resposta."""
+    client = _cliente_openai()
+    lote = client.batches.retrieve(batch_id)
+    if lote.status != "completed" or not lote.output_file_id:
+        return {"status": lote.status, "resposta": None}
+
+    conteudo = client.files.content(lote.output_file_id).text
+    for linha in conteudo.splitlines():
+        if not linha.strip():
+            continue
+        item = json.loads(linha)
+        if item.get("custom_id") == CUSTOM_ID_CONVERSA:
+            corpo = item.get("response", {}).get("body", {})
+            texto = corpo.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"status": "completed", "resposta": texto}
+    return {"status": "completed", "resposta": None}
+
+
 def verificar_batch(batch_id: str) -> dict:
     """Consulta o status do lote. Se 'completed', baixa e devolve os resultados —
     senão devolve só o status pra quem chamou tentar de novo depois."""
