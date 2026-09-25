@@ -34,6 +34,16 @@
     cursor: pointer; text-align: left; font: inherit; color: inherit; width: 100%;
   }
   .cliente-card:hover { border-color: var(--accent); }
+  .cliente-card-wrap { position: relative; }
+  .excluir-card {
+    position: absolute; top: 8px; right: 8px; width: 24px; height: 24px;
+    border: none; border-radius: 6px; background: none; color: var(--muted);
+    font-size: 16px; line-height: 1; cursor: pointer; padding: 0; opacity: 0;
+    transition: opacity .15s;
+  }
+  .cliente-card-wrap:hover .excluir-card { opacity: 1; }
+  .excluir-card:hover { color: var(--err); background: var(--card); }
+  .excluir-card:focus-visible { opacity: 1; outline: 2px solid var(--err); }
   .cliente-card h3 { margin: 0 0 4px; font-size: 15px; }
   .cliente-card .nicho { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
   .cliente-card .status { display: inline-block; margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
@@ -183,11 +193,6 @@
       <small class="hint" id="info-origem"></small>
     </fieldset>
 
-    <fieldset>
-      <legend>Briefing</legend>
-      <small class="hint">O briefing agora é feito pelo chat, depois das credenciais — assim a proposta de funil já leva em conta a conta real do Kommo e pode ser aplicada na hora.</small>
-    </fieldset>
-
     <button type="button" class="principal" id="botao-proximo">Próximo</button>
   </section>
 
@@ -216,6 +221,19 @@
     <button type="button" id="chat-enviar" disabled>Enviar</button>
   </div>
 </section>
+
+<div class="modal-fundo" id="modal-excluir" style="display:none">
+  <div class="modal-caixa" style="max-width:420px">
+    <div class="modal-topo">
+      <h2>Excluir cliente</h2>
+      <button type="button" class="modal-fechar" id="botao-fechar-excluir">&times;</button>
+    </div>
+    <div class="aviso-existente" id="excluir-detalhe" style="border-left-color:var(--err)"></div>
+    <button type="button" class="principal" id="botao-confirmar-exclusao"
+            style="color:var(--err)">Excluir definitivamente</button>
+    <div id="resultado-exclusao"></div>
+  </div>
+</div>
 
 <div class="modal-fundo" id="modal-engrenagem" style="display:none">
   <div class="modal-caixa">
@@ -381,17 +399,33 @@ async function carregarClientes() {
   }
 
   for (const c of clientes) {
+    const wrap = document.createElement('div');
+    wrap.className = 'cliente-card-wrap';
+
     const el = document.createElement('button');
     el.type = 'button';
     el.className = 'cliente-card';
     const data = new Date(c.criado_em).toLocaleDateString('pt-BR');
     el.innerHTML = `
-      <h3>${c.cliente_nome}</h3>
-      <div class="nicho">${c.nicho}</div>
+      <h3>${escaparHtml(c.cliente_nome)}</h3>
+      <div class="nicho">${escaparHtml(c.nicho)}</div>
       <div class="status ${c.status}">${c.status}</div>
       <div class="data" style="margin-top:6px">criado em ${data}</div>`;
     el.addEventListener('click', () => abrirGerenciamento(c.id));
-    grid.appendChild(el);
+
+    const excluir = document.createElement('button');
+    excluir.type = 'button';
+    excluir.className = 'excluir-card';
+    excluir.title = 'Excluir cliente';
+    excluir.textContent = '×';
+    excluir.addEventListener('click', (ev) => {
+      ev.stopPropagation();  // senão abriria o cliente junto
+      abrirConfirmacaoExclusao(c);
+    });
+
+    wrap.appendChild(el);
+    wrap.appendChild(excluir);
+    grid.appendChild(wrap);
   }
 
   if (clientes.length === 0) {
@@ -402,6 +436,58 @@ async function carregarClientes() {
     grid.prepend(vazio);
   }
 }
+
+let clienteParaExcluir = null;
+
+function abrirConfirmacaoExclusao(cliente) {
+  clienteParaExcluir = cliente;
+  const detalhe = document.getElementById('excluir-detalhe');
+  const temAgente = cliente.status === 'clonado' && cliente.workflow_novo_id;
+  detalhe.innerHTML = `
+    <strong>${escaparHtml(cliente.cliente_nome)}</strong><br>
+    ${temAgente
+      ? `Vai apagar também no n8n: o workflow <strong>${escaparHtml(cliente.workflow_novo_id)}</strong>, as
+         sub-workflows exclusivas dele e a credencial OpenAI do cliente.
+         Sub-workflow usada por outro cliente é preservada.`
+      : 'Este cliente ainda não tem agente no n8n — some só do painel.'}
+    <br><br>O histórico do chat e os logs vão junto. <strong>Não dá pra desfazer.</strong>`;
+  document.getElementById('resultado-exclusao').innerHTML = '';
+  const botao = document.getElementById('botao-confirmar-exclusao');
+  botao.disabled = false;
+  botao.textContent = 'Excluir definitivamente';
+  document.getElementById('modal-excluir').style.display = 'flex';
+}
+
+document.getElementById('botao-fechar-excluir').addEventListener('click', () => {
+  document.getElementById('modal-excluir').style.display = 'none';
+  clienteParaExcluir = null;
+});
+
+document.getElementById('botao-confirmar-exclusao').addEventListener('click', async () => {
+  if (!clienteParaExcluir) return;
+  const botao = document.getElementById('botao-confirmar-exclusao');
+  const saida = document.getElementById('resultado-exclusao');
+  botao.disabled = true;
+  botao.textContent = 'Excluindo...';
+  try {
+    const resp = await fetch(`/clientes/${clienteParaExcluir.id}`, { method: 'DELETE' });
+    const corpo = await resp.json();
+    if (!resp.ok) {
+      saida.innerHTML = `<div class="card err">${escaparHtml(corpo.error || 'falha ao excluir')}</div>`;
+      botao.disabled = false;
+      botao.textContent = 'Excluir definitivamente';
+      return;
+    }
+    const linhas = (corpo.n8n || []).map(l => `<li>${escaparHtml(l)}</li>`).join('');
+    saida.innerHTML = `<div class="card">Cliente removido.${linhas ? `<ul class="avisos">${linhas}</ul>` : ''}</div>`;
+    botao.textContent = 'Removido';
+    await carregarClientes();
+  } catch (e) {
+    saida.innerHTML = `<div class="card err">${escaparHtml(String(e))}</div>`;
+    botao.disabled = false;
+    botao.textContent = 'Excluir definitivamente';
+  }
+});
 
 let origensConfig = [];
 

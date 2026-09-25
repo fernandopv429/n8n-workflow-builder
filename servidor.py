@@ -46,10 +46,11 @@ import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import n8n_edicao  # noqa: E402
+import cloner  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
 from manifest import ClienteManifest  # noqa: E402
-from n8n_client import N8nError  # noqa: E402
+from n8n_client import N8nClient, N8nError  # noqa: E402
 from templates_nicho import NICHOS  # noqa: E402
 
 ENV = carregar_env()
@@ -347,6 +348,40 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._responder_json(200, {"resposta": resposta})
+
+    # --- DELETE ------------------------------------------------------
+
+    def do_DELETE(self):
+        if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_ID.match(self.path)
+        if not m:
+            self._responder_json(404, {"error": "não encontrado"})
+            return
+        cliente_id = int(m.group(1))
+
+        cliente = db.obter_cliente(cliente_id)
+        if cliente is None:
+            self._responder_json(404, {"error": "cliente não encontrado"})
+            return
+
+        relatorio = []
+        if cliente["workflow_novo_id"]:
+            try:
+                relatorio = cloner.remover_agente(
+                    N8nClient(), cliente["workflow_novo_id"], db.obter_credencial_openai(cliente_id)
+                )
+            except Exception as e:  # noqa: BLE001 — n8n fora do ar não deve travar a remoção no painel
+                relatorio = [f"falha ao limpar no n8n: {e}"]
+                sys.stderr.write(f"[servidor] {relatorio[0]}\n")
+
+        db.remover_cliente(cliente_id)
+        self._responder_json(200, {
+            "removido": True,
+            "cliente_nome": cliente["cliente_nome"],
+            "n8n": relatorio,
+        })
 
     # --- PUT ---------------------------------------------------------
 

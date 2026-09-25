@@ -253,6 +253,59 @@ def montar_previa(cliente_n8n: N8nClient, manifesto: ClienteManifest, prompt_bri
     }
 
 
+def remover_agente(cliente_n8n: N8nClient, workflow_id: str, credencial_id: str = "") -> list:
+    """Apaga do n8n o agente de um cliente: workflow principal, as
+    sub-workflows que SÓ ele usa, e a credencial OpenAI dele.
+
+    A trava importante: a sub-workflow do template é COMPARTILHADA entre os
+    clientes clonados dela. Apagar junto quebraria todo mundo. Por isso cada
+    sub-workflow só é removida depois de confirmar que nenhum outro workflow
+    da instância a referencia. Mesma checagem pra credencial.
+    """
+    relatorio = []
+    principal = cliente_n8n.get_workflow(workflow_id)
+    subs_do_cliente = _referencias_subworkflow(principal["nodes"])
+
+    # Mapa do que o RESTO da instância usa, ignorando o workflow que vai sair.
+    outros_usam_sub = set()
+    outros_usam_cred = set()
+    for w in cliente_n8n.listar_workflows():
+        if w["id"] == workflow_id:
+            continue
+        completo = cliente_n8n.get_workflow(w["id"])
+        outros_usam_sub |= _referencias_subworkflow(completo["nodes"])
+        for n in completo["nodes"]:
+            cred = (n.get("credentials") or {}).get("openAiApi")
+            if cred and cred.get("id"):
+                outros_usam_cred.add(cred["id"])
+
+    for wid in [workflow_id] + sorted(subs_do_cliente):
+        if wid != workflow_id and wid in outros_usam_sub:
+            relatorio.append(f"sub-workflow {wid} mantida — ainda é usada por outro cliente")
+            continue
+        try:
+            cliente_n8n.deactivate_workflow(wid)
+        except Exception:  # noqa: BLE001 — pode já estar inativa
+            pass
+        try:
+            cliente_n8n.delete_workflow(wid)
+            relatorio.append(f"workflow {wid} removido")
+        except Exception as e:  # noqa: BLE001
+            relatorio.append(f"falhei ao remover o workflow {wid}: {e}")
+
+    if credencial_id:
+        if credencial_id in outros_usam_cred:
+            relatorio.append(f"credencial {credencial_id} mantida — ainda é usada por outro workflow")
+        else:
+            try:
+                cliente_n8n.delete_credencial(credencial_id)
+                relatorio.append(f"credencial {credencial_id} removida")
+            except Exception as e:  # noqa: BLE001
+                relatorio.append(f"falhei ao remover a credencial {credencial_id}: {e}")
+
+    return relatorio
+
+
 def _desfazer(cliente_n8n: N8nClient, workflow_id: str, ids_subworkflows: list, credencial_id: str, avisos: list):
     """Apaga o que já tinha sido criado quando a clonagem falha no meio.
 

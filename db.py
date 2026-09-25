@@ -309,6 +309,26 @@ def listar_mensagens(cliente_id: int) -> list:
     return [{"role": r[0], "conteudo": r[1], "criado_em": r[2].isoformat()} for r in linhas]
 
 
+def obter_credencial_openai(cliente_id: int) -> str:
+    """Id da credencial OpenAI criada pra este cliente, guardado no manifesto
+    na hora da clonagem. Necessário pra conseguir removê-la junto com o agente."""
+    with _conectar() as conn:
+        r = conn.execute("SELECT manifesto FROM clientes WHERE id = %s", (cliente_id,)).fetchone()
+    if not r or not r[0]:
+        return ""
+    return (r[0] or {}).get("openai_credential_id", "") or ""
+
+
+def remover_cliente(cliente_id: int):
+    """Apaga o cliente e tudo que pende dele no banco. Não toca no n8n — quem
+    decide isso é quem chama (ver cloner.remover_agente)."""
+    with _conectar() as conn:
+        conn.execute("DELETE FROM chat_lotes WHERE cliente_id = %s", (cliente_id,))
+        conn.execute("DELETE FROM chat_mensagens WHERE cliente_id = %s", (cliente_id,))
+        conn.execute("DELETE FROM logs WHERE cliente_id = %s", (cliente_id,))
+        conn.execute("DELETE FROM clientes WHERE id = %s", (cliente_id,))
+
+
 def registrar_lote_chat(cliente_id: int, batch_id: str, pergunta: str):
     with _conectar() as conn:
         conn.execute(
