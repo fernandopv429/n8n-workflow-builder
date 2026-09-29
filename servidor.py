@@ -35,6 +35,7 @@ import os
 import pathlib
 import re
 import sys
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 RAIZ = pathlib.Path(__file__).resolve().parent
@@ -84,6 +85,21 @@ def _com_imagem(cliente: dict) -> dict:
         cliente.get("imagem_pb_record_id"), cliente.get("imagem_pb_filename")
     )
     return cliente
+
+
+# Saber O QUE está rodando em produção não era possível: o Coolify não
+# redeploya sozinho a cada push, e a única forma de descobrir se um commit
+# tinha subido era reproduzir o bug. `/saude` passa a dizer.
+#
+# O commit vem de variável de ambiente porque a imagem não leva o .git dentro
+# (ver .dockerignore). O Coolify injeta SOURCE_COMMIT nos deploys de git; se
+# não vier, `no_ar_desde` já responde "houve redeploy depois de tal hora?".
+VERSAO = (
+    os.environ.get("SOURCE_COMMIT")
+    or os.environ.get("APP_COMMIT")
+    or "desconhecida"
+)[:12]
+SUBIU_EM = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -160,7 +176,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 self._responder_json(503, {"status": "degradado", "banco": str(e)})
                 return
-            self._responder_json(200, {"status": "ok", "banco": "ok"})
+            self._responder_json(200, {
+                "status": "ok", "banco": "ok",
+                "versao": VERSAO, "no_ar_desde": SUBIU_EM,
+            })
             return
 
         if not self._autenticado():

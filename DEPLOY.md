@@ -41,7 +41,14 @@ crédito da OpenAI. Melhor ficar inacessível do que aberto.
 `GET /saude` — única rota sem autenticação, justamente pro healthcheck do
 Coolify/Docker conseguir chamar. Devolve:
 
-- `200 {"status":"ok","banco":"ok"}`
+- `200 {"status":"ok","banco":"ok","versao":"1d806e2","no_ar_desde":"..."}`
+
+`versao` e `no_ar_desde` existem pra responder "esse commit já subiu?" sem
+ter que reproduzir o bug — o Coolify não redeploya sozinho a cada push. O
+commit vem de `SOURCE_COMMIT` (o Coolify injeta nos deploys de git) ou de
+`APP_COMMIT`, se quiser passar à mão; sem nenhuma das duas vem
+`"desconhecida"`, e aí `no_ar_desde` ainda diz se houve redeploy.
+
 - `503 {"status":"degradado","banco":"..."}` se o Postgres não responder
 
 O `Dockerfile` já traz um `HEALTHCHECK` equivalente para `docker run` avulso.
