@@ -230,7 +230,7 @@
 
   <div class="chat-area vazio" id="chat-area"></div>
   <div class="linha chat-opcao-lote">
-    <input type="checkbox" id="chat_em_lote" disabled>
+    <input type="checkbox" id="chat_em_lote" checked disabled>
     <label for="chat_em_lote">Enviar pela Batch API — 50% mais barato, resposta em minutos a horas. Só gera texto (prompt, proposta): não executa nada no n8n nem no Kommo.</label>
   </div>
   <div class="chat-input-barra">
@@ -313,6 +313,8 @@ function esconderTelas() {
 }
 
 function mostrarDashboard() {
+  pararEspera();          // senão o timer do lote continua rodando fora da tela
+  clienteAtualId = null;
   esconderTelas();
   containerEstreito.style.display = 'block';
   dashboard.style.display = 'block';
@@ -328,6 +330,7 @@ function mostrarPasso1() {
 }
 
 async function abrirGerenciamento(id) {
+  pararEspera();          // troca de cliente não herda a espera do anterior
   clienteAtualId = id;
   esconderTelas();
   telaGerenciamento.style.display = 'flex';
@@ -684,13 +687,88 @@ async function carregarChat() {
   emLote.disabled = false;
   input.placeholder = 'Converse com o agente — cole o briefing aqui pra gerar o prompt';
 
-  const { mensagens } = await (await fetch(`/clientes/${clienteAtualId}/mensagens`)).json();
+  const { mensagens, lotes_pendentes } = await (await fetch(`/clientes/${clienteAtualId}/mensagens`)).json();
   if (mensagens.length === 0) {
     area.className = 'chat-area vazio';
     area.textContent = 'Nenhuma conversa ainda — mande uma mensagem pra começar.';
   } else {
     renderizarMensagens(mensagens);
   }
+  if (lotes_pendentes > 0) aguardarLote(mensagens.length);
+}
+
+// A resposta da Batch API leva de minutos a horas e não existe worker em
+// segundo plano: quem busca é esta tela, enquanto estiver aberta. Sem isso a
+// pessoa tinha que lembrar de voltar no cliente pra descobrir se chegou.
+let timerLote = null;
+
+function pararEspera() {
+  if (timerLote) { clearTimeout(timerLote); timerLote = null; }
+  document.getElementById('chat-aguardando')?.remove();
+}
+
+function aguardarLote(qtdConhecida) {
+  pararEspera();
+  const area = document.getElementById('chat-area');
+  area.classList.remove('vazio');
+  area.insertAdjacentHTML('beforeend',
+    '<div class="msg pensando" id="chat-aguardando">Aguardando a Batch API… ' +
+    'pode levar de minutos a horas. Pode deixar esta tela aberta: a resposta ' +
+    'aparece sozinha.</div>');
+  area.scrollTop = area.scrollHeight;
+
+  const clienteDaEspera = clienteAtualId;
+  let ciclos = 0;
+
+  // Cada checagem chega no servidor e vira uma consulta à Batch API da OpenAI.
+  // Um lote pode levar horas, então o intervalo cresce: rápido no começo (é
+  // quando os lotes pequenos costumam voltar) e espaçado depois, pra não fazer
+  // centenas de consultas por hora numa espera longa.
+  const proximoIntervalo = () => (ciclos < 8 ? 15000 : ciclos < 20 ? 60000 : 180000);
+
+  const checar = async () => {
+    if (clienteAtualId !== clienteDaEspera) { pararEspera(); return; }
+    ciclos += 1;
+    let dados;
+    try {
+      dados = await (await fetch(`/clientes/${clienteDaEspera}/mensagens`)).json();
+    } catch (e) {
+      timerLote = setTimeout(checar, proximoIntervalo());  // rede oscilou
+      return;
+    }
+    if (clienteAtualId !== clienteDaEspera) { pararEspera(); return; }
+
+    if (dados.mensagens.length > qtdConhecida) {
+      pararEspera();
+      renderizarMensagens(dados.mensagens);
+      avisarRespostaChegou();
+      carregarLogs();
+      return;
+    }
+    if (!dados.lotes_pendentes) {
+      // o lote saiu da fila sem gerar mensagem (falhou ou foi cancelado)
+      pararEspera();
+      area.insertAdjacentHTML('beforeend',
+        '<div class="msg assistant">O envio pela Batch API terminou sem resposta. ' +
+        'Veja os logs e tente de novo.</div>');
+      area.scrollTop = area.scrollHeight;
+      carregarLogs();
+      return;
+    }
+    timerLote = setTimeout(checar, proximoIntervalo());
+  };
+
+  timerLote = setTimeout(checar, proximoIntervalo());
+}
+
+function avisarRespostaChegou() {
+  // aviso do navegador só se a pessoa já tiver permitido; nunca pedimos do nada
+  if (window.Notification && Notification.permission === 'granted') {
+    new Notification('Resposta da Batch API chegou');
+  }
+  const titulo = document.title;
+  document.title = '● resposta chegou — ' + titulo;
+  setTimeout(() => { document.title = titulo; }, 20000);
 }
 
 async function enviarMensagemChat() {
@@ -722,9 +800,8 @@ async function enviarMensagemChat() {
     const corpo = await resp.json();
     document.getElementById('chat-pensando')?.remove();
     if (resp.ok && corpo.em_lote) {
-      area.insertAdjacentHTML('beforeend',
-        '<div class="msg pensando">Enviado pela Batch API. A resposta chega em minutos a horas — ' +
-        'reabra este cliente depois pra ver.</div>');
+      const qtd = area.querySelectorAll('.msg:not(.pensando)').length;
+      aguardarLote(qtd);
     } else if (resp.ok) {
       area.insertAdjacentHTML('beforeend', `<div class="msg assistant">${escaparHtml(corpo.resposta)}</div>`);
     } else {

@@ -184,13 +184,18 @@ class Handler(BaseHTTPRequestHandler):
         m = ROTA_CLIENTE_MENSAGENS.match(self.path)
         if m:
             cliente_id = int(m.group(1))
-            # Poll-on-read: sem worker em segundo plano, a resposta de um lote
-            # só é buscada quando alguém reabre a conversa.
+            # Poll-on-read: não há worker em segundo plano, então a resposta de
+            # um lote só é buscada quando alguém pede as mensagens. Quem chama
+            # de tempos em tempos é a própria tela do chat (ver index.html),
+            # enquanto `lotes_pendentes` for maior que zero.
             try:
                 agente_chat.buscar_respostas_em_lote(cliente_id)
             except Exception as e:  # noqa: BLE001 — não impede de mostrar o histórico
                 sys.stderr.write(f"[servidor] falha ao checar lotes do chat: {e}\n")
-            self._responder_json(200, {"mensagens": db.listar_mensagens(cliente_id)})
+            self._responder_json(200, {
+                "mensagens": db.listar_mensagens(cliente_id),
+                "lotes_pendentes": len(db.listar_lotes_chat_pendentes(cliente_id)),
+            })
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)
