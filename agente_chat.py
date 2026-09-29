@@ -309,6 +309,10 @@ def _system_prompt(cliente: dict) -> str:
         "3 por etapa (um por nível), 1000 caracteres cada. Não existe `description` no "
         "singular. Formato: etapa_json = {\"name\": \"Agendamento\", \"sort\": 30, "
         "\"descriptions\": [{\"level\": \"newbie\", \"description\": \"texto\"}]}\n"
+        "- Dica é SÓ-ADIÇÃO: dá pra criar a dica de um nível vazio, mas a API do "
+        "Kommo NÃO deixa alterar nem apagar uma dica que já existe — recusa mesmo "
+        "com texto igual. Se o usuário pedir pra mudar uma dica existente, explique "
+        "que isso só pela tela do Kommo, e não fique tentando outros formatos.\n"
         "- `kommo_listar_funis` NÃO traz as descrições das etapas, mesmo quando existem. "
         "Use `kommo_ver_etapa` pra ler uma etapa com as descrições antes de atualizá-la "
         "(assim você reaproveita name/sort/descrições atuais em vez de apagá-los).\n"
@@ -423,6 +427,32 @@ def _guarda_etapa_kommo(args: dict, credenciais: dict) -> tuple:
     corpo.pop("confirmar_renomear", None)
 
     # o PATCH substitui: o que não for reenviado, o Kommo redefine
+    # `descriptions` é só-adição: o Kommo aceita criar a dica de um nível que
+    # ainda não existe, mas RECUSA qualquer PATCH que mande um nível já
+    # preenchido — mesmo com texto idêntico, e mesmo acompanhado de um nível
+    # novo (testado em 29/09/2026). Sem esta checagem o modelo levava um
+    # "Bad request" mudo e ficava tentando variações de formato.
+    pedidas = corpo.get("descriptions")
+    if isinstance(pedidas, list) and pedidas:
+        existentes = atual.get("descriptions") or {}
+        niveis_atuais = (
+            {d.get("level") for d in existentes.values()}
+            if isinstance(existentes, dict)
+            else {d.get("level") for d in existentes}
+        )
+        repetidos = sorted(
+            {d.get("level") for d in pedidas if isinstance(d, dict)} & niveis_atuais
+        )
+        if repetidos:
+            return None, (
+                f"erro: a etapa '{nome_atual}' já tem dica no(s) nível(is) "
+                f"{', '.join(repetidos)}, e a API do Kommo não permite alterar nem "
+                "remover uma dica existente — só criar a de um nível ainda vazio "
+                "(newbie, candidate, master). Diga isso ao usuário: para mudar essa "
+                "dica ele precisa editar na tela do Kommo. Se quiser, ofereça criar "
+                "a dica de outro nível."
+            )
+
     corpo.setdefault("name", nome_atual)
     corpo.setdefault("sort", atual.get("sort"))
     cor_atual = (atual.get("color") or "").lower()

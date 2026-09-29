@@ -401,6 +401,39 @@ def teste_trava_preserva_cor_valida():
     assert json.loads(corr["etapa_json"])["color"] == "#98cbff"
 
 
+def teste_trava_avisa_que_dica_existente_nao_muda():
+    """A API do Kommo recusa qualquer PATCH que mande um `level` que já tem
+    texto — mesmo idêntico. Sem isto o modelo levava "Bad request" mudo e
+    ficava tentando variações de formato (testado ao vivo em 29/09/2026)."""
+    ac, orig = _com_mcp_dublado(_etapa_falsa(
+        color="#98cbff",
+        descriptions={"12": {"level": "newbie", "description": "dica que já existe"}}))
+    try:
+        corr, erro = ac._guarda_etapa_kommo(
+            {"pipeline_id": 1, "status_id": 99116543,
+             "etapa_json": json.dumps({"descriptions": [
+                 {"level": "newbie", "description": "texto novo"}]})}, {})
+    finally:
+        _restaura(orig)
+    assert corr is None, "devia barrar antes de gastar a chamada"
+    assert "newbie" in erro and "tela do Kommo" in erro, erro
+
+
+def teste_trava_deixa_criar_dica_de_nivel_vazio():
+    ac, orig = _com_mcp_dublado(_etapa_falsa(
+        color="#98cbff",
+        descriptions={"12": {"level": "newbie", "description": "já existe"}}))
+    try:
+        corr, erro = ac._guarda_etapa_kommo(
+            {"pipeline_id": 1, "status_id": 99116543,
+             "etapa_json": json.dumps({"descriptions": [
+                 {"level": "candidate", "description": "nível ainda vazio"}]})}, {})
+    finally:
+        _restaura(orig)
+    assert erro is None, erro
+    assert json.loads(corr["etapa_json"])["descriptions"][0]["level"] == "candidate"
+
+
 TESTES = [
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
@@ -424,6 +457,8 @@ TESTES = [
     teste_trava_barra_etapas_que_o_kommo_nao_edita,
     teste_trava_completa_sort_e_omite_cor_legada,
     teste_trava_preserva_cor_valida,
+    teste_trava_avisa_que_dica_existente_nao_muda,
+    teste_trava_deixa_criar_dica_de_nivel_vazio,
 ]
 
 
