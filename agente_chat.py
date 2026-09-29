@@ -357,6 +357,9 @@ ETAPAS_RESERVADAS = {142, 143}
 # antigas têm etapas com cores fora desta lista (#ffff99, #99ccff, #c1c1c1...)
 # que o Kommo mostra mas RECUSA se você reenviar — reenviar a cor atual de uma
 # etapa dessas derruba o PATCH inteiro com "Bad request".
+# Os três níveis de dica de etapa. Minúsculas: o Kommo recusa "NEWBIE".
+NIVEIS_DICA = {"newbie", "candidate", "master"}
+
 CORES_ETAPA_KOMMO = {
     "#fffeb2", "#fffd7f", "#fff000", "#ffeab2", "#ffdc7f", "#ffce5a", "#ffdbdb",
     "#ffc8c8", "#ff8f92", "#d6eaff", "#c1e0ff", "#98cbff", "#ebffb1", "#deff81",
@@ -434,23 +437,35 @@ def _guarda_etapa_kommo(args: dict, credenciais: dict) -> tuple:
     # "Bad request" mudo e ficava tentando variações de formato.
     pedidas = corpo.get("descriptions")
     if isinstance(pedidas, list) and pedidas:
+        pedidos = {d.get("level") for d in pedidas if isinstance(d, dict)}
+        invalidos = sorted(n for n in pedidos if n not in NIVEIS_DICA)
+        if invalidos:
+            return None, (
+                f"erro: nível de dica inválido: {', '.join(map(str, invalidos))}. "
+                "Só existem newbie, candidate e master, em minúsculas "
+                "(o Kommo recusa 'NEWBIE')."
+            )
+
         existentes = atual.get("descriptions") or {}
         niveis_atuais = (
             {d.get("level") for d in existentes.values()}
             if isinstance(existentes, dict)
             else {d.get("level") for d in existentes}
         )
-        repetidos = sorted(
-            {d.get("level") for d in pedidas if isinstance(d, dict)} & niveis_atuais
-        )
+        repetidos = sorted(pedidos & niveis_atuais)
         if repetidos:
+            livres = sorted(NIVEIS_DICA - niveis_atuais)
+            saida = (
+                f"Os três níveis desta etapa já estão preenchidos, então nenhuma dica "
+                "nova cabe aqui."
+                if not livres
+                else f"Níveis ainda livres nesta etapa: {', '.join(livres)}."
+            )
             return None, (
                 f"erro: a etapa '{nome_atual}' já tem dica no(s) nível(is) "
                 f"{', '.join(repetidos)}, e a API do Kommo não permite alterar nem "
-                "remover uma dica existente — só criar a de um nível ainda vazio "
-                "(newbie, candidate, master). Diga isso ao usuário: para mudar essa "
-                "dica ele precisa editar na tela do Kommo. Se quiser, ofereça criar "
-                "a dica de outro nível."
+                f"remover uma dica existente. {saida} Diga ao usuário que mudar uma "
+                "dica já escrita só é possível pela tela do Kommo."
             )
 
     corpo.setdefault("name", nome_atual)

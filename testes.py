@@ -434,6 +434,38 @@ def teste_trava_deixa_criar_dica_de_nivel_vazio():
     assert json.loads(corr["etapa_json"])["descriptions"][0]["level"] == "candidate"
 
 
+def teste_trava_rejeita_nivel_de_dica_invalido():
+    """`level` é sensível a maiúscula e fechado em três valores; o Kommo recusa
+    'NEWBIE' e 'expert' com o mesmo Bad request mudo (testado 29/09/2026)."""
+    for nivel in ("expert", "NEWBIE"):
+        ac, orig = _com_mcp_dublado(_etapa_falsa(color="#98cbff"))
+        try:
+            corr, erro = ac._guarda_etapa_kommo(
+                {"pipeline_id": 1, "status_id": 99116543,
+                 "etapa_json": json.dumps({"descriptions": [
+                     {"level": nivel, "description": "x"}]})}, {})
+        finally:
+            _restaura(orig)
+        assert corr is None, f"devia barrar o nível {nivel}"
+        assert "inválido" in erro, erro
+
+
+def teste_trava_diz_quais_niveis_sobraram():
+    cheia = {str(i): {"level": n, "description": "x"}
+             for i, n in enumerate(("newbie", "candidate", "master"))}
+    for existentes, espera in ((cheia, "já estão preenchidos"),
+                               ({"1": {"level": "newbie", "description": "x"}}, "candidate, master")):
+        ac, orig = _com_mcp_dublado(_etapa_falsa(color="#98cbff", descriptions=existentes))
+        try:
+            _, erro = ac._guarda_etapa_kommo(
+                {"pipeline_id": 1, "status_id": 99116543,
+                 "etapa_json": json.dumps({"descriptions": [
+                     {"level": "newbie", "description": "y"}]})}, {})
+        finally:
+            _restaura(orig)
+        assert espera in erro, f"esperava '{espera}' em: {erro}"
+
+
 TESTES = [
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
@@ -459,6 +491,8 @@ TESTES = [
     teste_trava_preserva_cor_valida,
     teste_trava_avisa_que_dica_existente_nao_muda,
     teste_trava_deixa_criar_dica_de_nivel_vazio,
+    teste_trava_rejeita_nivel_de_dica_invalido,
+    teste_trava_diz_quais_niveis_sobraram,
 ]
 
 
