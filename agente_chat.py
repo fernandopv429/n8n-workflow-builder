@@ -33,7 +33,10 @@ MODELO = "gpt-4o-mini"
 # Quantas rodadas de tool-call o chat encadeia num turno. 6 era pouco pra tarefa
 # de montagem: criar um funil com 6 etapas e a dica de cada uma passa disso, e o
 # usuário via só 'não consegui concluir em poucas etapas', sem saber por quê.
-MAX_RODADAS_FERRAMENTA = 16
+# Montar 2 funis com campos e etiquetas passa de 40; quando estoura, o modelo
+# presta contas do que já fez em vez de sumir com o trabalho (ver o fim de
+# processar_mensagem).
+MAX_RODADAS_FERRAMENTA = 40
 
 # só "base-url" fica exposto ao chat — "kommo-token" é segredo, nunca deve
 # aparecer na conversa (chat_mensagens/logs não são criptografados).
@@ -749,6 +752,32 @@ def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
             )
             mensagens.append({"role": "tool", "tool_call_id": tc.id, "content": resultado})
 
-    aviso = "Não consegui concluir em poucas etapas — tenta reformular o pedido?"
-    db.salvar_mensagem(cliente_id, "assistant", aviso)
-    return aviso
+    # Estourou o limite. As ferramentas que já rodaram EXECUTARAM de verdade —
+    # devolver só "tenta reformular" escondia isso: em 29/09/2026 um briefing
+    # grande criou funil e contatos no Kommo e o usuário não soube de nada.
+    # Um último turno SEM ferramentas, pro modelo prestar contas do que fez.
+    mensagens.append({
+        "role": "system",
+        "content": (
+            "Você atingiu o limite de ações deste turno e não pode chamar mais "
+            "ferramentas. Responda agora, em texto, sem inventar nada: (1) o que "
+            "você JÁ FEZ de fato, com base nos resultados das ferramentas acima — "
+            "cite nomes e IDs do que foi criado ou alterado; (2) o que ainda "
+            "FALTA; (3) ofereça continuar de onde parou. Seja específico: a "
+            "pessoa precisa saber o que já existe no Kommo pra não pedir de novo "
+            "e acabar duplicando."
+        ),
+    })
+    try:
+        fecho = client.chat.completions.create(
+            model=MODELO, messages=mensagens,
+        ).choices[0].message.content
+    except Exception as e:  # noqa: BLE001 — se até isso falhar, ao menos não mentimos
+        fecho = (
+            "Atingi o limite de ações deste turno com a tarefa pela metade, e não "
+            "consegui montar o resumo do que já foi feito "
+            f"({e}). Confira os logs deste cliente antes de repetir o pedido — "
+            "parte das mudanças pode já ter sido aplicada no Kommo."
+        )
+    db.salvar_mensagem(cliente_id, "assistant", fecho)
+    return fecho
