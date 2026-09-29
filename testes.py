@@ -477,6 +477,9 @@ def teste_criar_funil_completa_campos_obrigatorios():
     assert erro is None, erro
     corpo = json.loads(corr["funil_json"])
     assert corpo["is_main"] is False and corpo["is_unsorted_on"] is True, corpo
+    # o `sort` do funil (não o das etapas) também é obrigatório — faltando ele o
+    # Kommo devolve FieldMissing, que o MCP entrega como "Bad request" genérico
+    assert corpo["sort"] == 100, corpo
 
 
 def teste_criar_funil_aceita_campos_soltos():
@@ -505,6 +508,30 @@ def teste_criar_funil_barra_dica_na_criacao():
         {"name": "E", "sort": 10,
          "descriptions": [{"level": "newbie", "description": "dica"}]}]}})
     assert erro and "kommo_adicionar_etapas" in erro, erro
+
+
+def teste_reconhece_corpo_de_erro_do_kommo():
+    """Com `neverError` nos nodes do MCP o corpo do Kommo chega até nós — é o
+    que diz qual campo faltou. O preço é que um 400/401 passa a ter a mesma
+    forma de um sucesso, então quem checa precisa olhar dentro do corpo."""
+    import mcp_kommo_client as mk
+
+    falha_400 = json.dumps([{"data": json.dumps({
+        "validation-errors": [{"request_id": "0", "errors": [
+            {"code": "FieldMissing", "path": "sort", "detail": "This field is missing."}]}],
+        "title": "Bad Request", "status": 400, "detail": "Request validation failed"})}])
+    msg = mk.erro_do_kommo(falha_400)
+    assert msg and "sort" in msg and "FieldMissing" in msg, msg
+
+    falha_401 = json.dumps([{"data": json.dumps(
+        {"title": "Unauthorized", "status": 401, "detail": "Invalid user name or password"})}])
+    assert "401" in (mk.erro_do_kommo(falha_401) or ""), mk.erro_do_kommo(falha_401)
+
+    # formato antigo, de node que ainda estoure NodeApiError
+    assert mk.erro_do_kommo(json.dumps({"error": {"message": "Bad request"}}))
+
+    sucesso = json.dumps([{"data": json.dumps({"_embedded": {"pipelines": [{"id": 1}]}})}])
+    assert mk.erro_do_kommo(sucesso) is None, "sucesso não pode ser lido como erro"
 
 
 TESTES = [
@@ -538,6 +565,7 @@ TESTES = [
     teste_criar_funil_aceita_campos_soltos,
     teste_criar_funil_barra_is_main_e_funil_sem_etapa,
     teste_criar_funil_barra_dica_na_criacao,
+    teste_reconhece_corpo_de_erro_do_kommo,
 ]
 
 

@@ -302,6 +302,12 @@ def _system_prompt(cliente: dict) -> str:
 
         "ARMADILHAS CONHECIDAS DO KOMMO (confirmadas na doc oficial em 29/09/2026,\n"
         "não descubra de novo na tentativa e erro):\n"
+        "- O Kommo responde erro COM CORPO, e o corpo agora chega até você. Uma "
+        "resposta que contenha `validation-errors`, `title: Bad Request` ou "
+        "`status` 4xx é uma FALHA, mesmo parecendo um retorno normal — nunca "
+        "diga que deu certo nesse caso. O corpo diz o campo exato: em "
+        "`validation-errors[].errors[]` vêm `path` (o campo) e `code` (ex: "
+        "FieldMissing). Corrija esse campo e refaça; cite o `path` ao usuário.\n"
         "- `status_id` é o campo `id` da etapa (ex: 112332268), NÃO o `sort` nem a "
         "posição dela no funil. Confundir os dois é o erro que mais apareceu nos logs: "
         "mandar sort 30 como status_id faz o Kommo responder um 'Bad request' que não "
@@ -534,6 +540,11 @@ def _guarda_criar_funil(args: dict) -> tuple:
         )
     corpo["is_main"] = False
     corpo["is_unsorted_on"] = True
+    # `sort` do FUNIL (não o das etapas) também é obrigatório: sem ele o Kommo
+    # responde FieldMissing, que o MCP entrega como um "Bad request" mudo. O
+    # valor é só a posição pedida — o Kommo renumera — então um número alto faz
+    # o funil novo nascer no fim da lista, sem passar na frente dos do cliente.
+    corpo.setdefault("sort", 100)
 
     etapas = (corpo.get("_embedded") or {}).get("statuses")
     if not etapas:
