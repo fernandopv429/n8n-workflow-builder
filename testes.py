@@ -203,6 +203,25 @@ def teste_sem_briefing_avisa_que_ficou_com_persona_do_template():
     assert any("persona do template" in a for a in avisos), avisos
 
 
+def teste_converte_param_json_do_kommo_pra_string():
+    """Falha real (25/09/2026): criar a etapa 'MIA' custou ~8 tentativas. Os
+    parâmetros `*_json` do MCP do Kommo são STRING contendo JSON, e o modelo
+    manda a lista estruturada — o erro que volta é genérico e não diz isso."""
+    import agente_chat
+
+    a = agente_chat._normalizar_args_kommo({
+        "etapas_json": [{"name": "MIA", "sort": 15}],
+        "pipeline_id": 12852327,
+    })
+    assert isinstance(a["etapas_json"], str), "lista tinha que virar string JSON"
+    assert json.loads(a["etapas_json"]) == [{"name": "MIA", "sort": 15}]
+    assert a["pipeline_id"] == 12852327, "o que não é *_json não pode ser mexido"
+
+    # string já pronta passa intacta
+    b = agente_chat._normalizar_args_kommo({"etapa_json": '{"name":"X"}'})
+    assert b["etapa_json"] == '{"name":"X"}'
+
+
 def teste_identifica_agente_principal_por_nao_ser_agentemov():
     """n8n_edicao: o agente principal é sempre o node tipo agent que NÃO se
     chama 'AgenteMov' — testado contra os 4 clientes reais, personas diferentes
@@ -295,6 +314,7 @@ TESTES = [
     teste_path_desvia_de_path_ja_em_uso,
     teste_aplica_prompt_do_briefing_no_agente,
     teste_sem_briefing_avisa_que_ficou_com_persona_do_template,
+    teste_converte_param_json_do_kommo_pra_string,
     teste_identifica_agente_principal_por_nao_ser_agentemov,
     teste_acha_node_database_nos_4_clientes,
     teste_renomear_node_atualiza_expressoes,

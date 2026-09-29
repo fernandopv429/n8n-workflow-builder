@@ -276,11 +276,54 @@ def _system_prompt(cliente: dict) -> str:
         "NUNCA execute uma ferramenta diferente do que foi pedido como substituto e "
         "diga que deu certo (ex: só chamar atualizar_prompt_agente quando o pedido "
         "for sobre o PROMPT/persona, nunca como tentativa de atender outro pedido).\n\n"
-        "Nunca invente resultado de ferramenta — se uma chamada falhar, diga isso "
-        "claramente. Antes de executar qualquer ação MARCADA como irreversível "
-        "(excluir funil, excluir etapa), pergunte e espere confirmação explícita "
-        "do usuário antes de chamar a ferramenta. Seja direto e breve nas respostas."
+        "Nunca invente resultado de ferramenta — se uma chamada falhar, diga o "
+        "erro que voltou, textualmente, em vez de dizer só que 'os parâmetros "
+        "podem estar incorretos'.\n\n"
+
+        "COMO AGIR (aprendido com falhas reais):\n"
+        "- Resolva os IDs você mesmo. Se o usuário citar um funil/etapa/lead "
+        "pelo NOME, chame kommo_listar_funis (ou o listar correspondente) pra "
+        "descobrir o id. Não peça id pro usuário — ele não tem por que saber.\n"
+        "- Peça confirmação só antes de EXCLUIR (funil, etapa, node, conexões). "
+        "Criar e atualizar você executa direto; ficar pedindo 'confirma?' a cada "
+        "passo de uma tarefa simples é ruído.\n"
+        "- Se uma chamada falhar, não repita a mesma coisa esperando resultado "
+        "diferente: leia o erro, mude o que ele aponta, ou diga o que falta.\n\n"
+
+        "ARMADILHAS CONHECIDAS DO KOMMO (não descubra de novo na tentativa e erro):\n"
+        "- COR de etapa: o Kommo só aceita uma paleta fechada e não documentada. "
+        "Hex 'óbvios' como #800080 (roxo) e #ffffff (branco) são RECUSADOS. "
+        "Por padrão OMITA o campo `color` — a etapa nasce com #fffeb2 e o usuário "
+        "ajusta a cor na tela do Kommo. Se ele insistir numa cor, avise disso.\n"
+        "- Parâmetros terminados em `_json` (etapas_json, etapa_json...) são "
+        "STRING contendo JSON, não objeto.\n"
+        "- `sort` é sugestão: o Kommo renumera as etapas: não prometa a posição "
+        "exata, confirme lendo depois.\n"
+        "- Ao atualizar etapa, mande `name` junto mesmo que não vá mudá-lo — "
+        "atualização sem `name` APAGA o nome da etapa.\n"
+        "- Tags de lead: o PATCH substitui a lista INTEIRA. Leia as tags atuais "
+        "e reenvie todas, senão as que faltarem são removidas.\n"
+        "- O Kommo às vezes devolve erro tendo gravado assim mesmo. Antes de "
+        "tentar de novo, leia o estado atual pra ver se já aplicou.\n\n"
+
+        "Seja direto e breve nas respostas."
     )
+
+
+def _normalizar_args_kommo(args: dict) -> dict:
+    """Os parâmetros `*_json` do MCP do Kommo são declarados como STRING
+    contendo JSON (ex: etapas_json='[{"name":"X","sort":20}]'). O modelo tende
+    a mandar a lista/objeto já estruturado, e aí a chamada falha com um erro
+    genérico que não diz o motivo — foi parte do sufoco pra criar a etapa 'MIA'
+    em 25/09/2026. Converter aqui é mais confiável que torcer pro modelo
+    acertar o formato."""
+    normalizados = {}
+    for chave, valor in args.items():
+        if chave.endswith("_json") and isinstance(valor, (dict, list)):
+            normalizados[chave] = json.dumps(valor, ensure_ascii=False)
+        else:
+            normalizados[chave] = valor
+    return normalizados
 
 
 FERRAMENTAS_ESTRUTURAIS = ("atualizar_node", "criar_node", "remover_node", "atualizar_connections")
@@ -342,7 +385,7 @@ def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: in
             )
         if nome.startswith("kommo_"):
             credenciais = n8n_edicao.ler_credenciais_kommo(workflow_id)
-            return mcp_kommo_client.chamar_ferramenta(nome, {**args, **credenciais})
+            return mcp_kommo_client.chamar_ferramenta(nome, {**_normalizar_args_kommo(args), **credenciais})
         return f"erro: ferramenta desconhecida '{nome}'"
     except Exception as e:  # noqa: BLE001 — devolve pro modelo como resultado da tool, não derruba o chat
         return f"erro: {e}"
