@@ -57,7 +57,14 @@ def _instrucao_kommo(cliente_nome: str, briefing: str) -> str:
         "A partir do briefing abaixo, proponha uma estrutura de funil de vendas "
         "pro Kommo CRM deste cliente. Devolva SÓ um JSON (sem comentário, sem "
         "markdown) no formato exato:\n"
-        '{"funis": [{"nome": "string", "etapas": ["string", "string", ...]}]}\n\n'
+        '{"funis": [{"nome": "string", "etapas": [{"nome": "string", "dica": "string"}]}]}\n\n'
+        "A `dica` é o texto de orientação que aparece na etapa pra quem trabalha o "
+        "funil: 1 a 3 frases dizendo o que fazer com um lead parado ali — o que "
+        "confirmar, o que registrar no cartão, quando avançar. Até 1000 caracteres, "
+        "concreta e específica deste negócio (nada de 'atender bem o cliente').\n"
+        "Escreva com cuidado: no Kommo a dica de uma etapa só pode ser gravada UMA "
+        "vez e depois NÃO há como corrigir pela API, só pela tela. Por isso ela "
+        "precisa sair certa já na criação do funil.\n\n"
         f"Cliente: {cliente_nome}\n\nBriefing:\n{briefing}"
     )
 

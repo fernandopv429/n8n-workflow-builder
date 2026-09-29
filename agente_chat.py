@@ -30,7 +30,10 @@ import mcp_kommo_client  # noqa: E402
 import n8n_edicao  # noqa: E402
 
 MODELO = "gpt-4o-mini"
-MAX_RODADAS_FERRAMENTA = 6
+# Quantas rodadas de tool-call o chat encadeia num turno. 6 era pouco pra tarefa
+# de montagem: criar um funil com 6 etapas e a dica de cada uma passa disso, e o
+# usuário via só 'não consegui concluir em poucas etapas', sem saber por quê.
+MAX_RODADAS_FERRAMENTA = 16
 
 # só "base-url" fica exposto ao chat — "kommo-token" é segredo, nunca deve
 # aparecer na conversa (chat_mensagens/logs não são criptografados).
@@ -236,7 +239,11 @@ def _bloco_sugestao(cliente: dict) -> str:
         partes.append(
             "Estrutura de funil sugerida pro Kommo a partir do briefing (ainda NÃO "
             "aplicada — só vira realidade se o usuário pedir e você chamar "
-            "kommo_criar_funil):\n"
+            "kommo_criar_funil). Cada etapa vem com uma `dica`: mande-a JUNTO na "
+            "criação, como `descriptions: [{\"level\": \"newbie\", \"description\": "
+            "<a dica>}]` dentro da etapa. Criar primeiro e escrever a dica depois "
+            "funciona, mas criar tudo de uma vez é melhor: a dica só pode ser "
+            "gravada uma vez por nível e não dá pra corrigir pela API depois:\n"
             + json.dumps(cliente["estrutura_kommo_sugerida"], ensure_ascii=False)
         )
     if cliente.get("prompt_sugerido"):
@@ -316,6 +323,13 @@ def _system_prompt(cliente: dict) -> str:
         "- `kommo_listar_funis` NÃO traz as descrições das etapas, mesmo quando existem. "
         "Use `kommo_ver_etapa` pra ler uma etapa com as descrições antes de atualizá-la "
         "(assim você reaproveita name/sort/descrições atuais em vez de apagá-los).\n"
+        "- MONTAR UM FUNIL DO ZERO: `kommo_criar_funil` exige `_embedded.statuses` "
+        "com pelo menos uma etapa (funil sem etapa é recusado) e IGNORA as dicas "
+        "mesmo que você as mande. Faça em 3 chamadas, não uma por etapa:\n"
+        "  1. `kommo_criar_funil` com APENAS a primeira etapa;\n"
+        "  2. `kommo_adicionar_etapas` com TODAS as outras de uma vez, cada uma já "
+        "com seu `descriptions` — essa ferramenta grava a dica junto;\n"
+        "  3. `kommo_atualizar_etapa` só na primeira etapa, pra dar a dica dela.\n"
         "- COR de etapa: a paleta é fechada. Só estes 21 valores são aceitos — #fffeb2 "
         "#fffd7f #fff000 #ffeab2 #ffdc7f #ffce5a #ffdbdb #ffc8c8 #ff8f92 #d6eaff #c1e0ff "
         "#98cbff #ebffb1 #deff81 #87f2c0 #f9deff #f3beff #ccc8f9 #eb93ff #f2f3f4 #e6e8ea. "
@@ -485,6 +499,57 @@ def _guarda_etapa_kommo(args: dict, credenciais: dict) -> tuple:
     return {**args, "etapa_json": json.dumps(corpo, ensure_ascii=False)}, None
 
 
+def _guarda_criar_funil(args: dict) -> tuple:
+    """Completa o corpo do POST de funil e barra o caso perigoso.
+
+    O Kommo só aceita criar funil com `is_main: false` E `is_unsorted_on: true`
+    juntos, mais `_embedded.statuses` com ao menos uma etapa — faltando
+    qualquer um dos três, responde só "Bad request". Em 29/09/2026 o chat
+    mandou `is_main: true`, que além de ser recusado teria REBAIXADO o funil
+    principal do cliente se passasse.
+    """
+    if "funil_json" in args:
+        try:
+            corpo = json.loads(args["funil_json"])
+        except json.JSONDecodeError:
+            return None, "erro: funil_json não é um JSON válido"
+    else:
+        # o modelo costuma mandar os campos do funil soltos em vez de embrulhados
+        # em `funil_json`; o corpo é o mesmo, só muda o formato da chamada
+        corpo = {c: v for c, v in args.items() if c not in ("kommo_domain", "access_token")}
+    if not isinstance(corpo, dict):
+        return None, "erro: funil_json precisa ser um objeto (sem os colchetes externos)"
+    if not corpo.get("name"):
+        return None, "erro: funil precisa de `name`"
+
+    if corpo.get("is_main") is True:
+        return None, (
+            "erro: `is_main: true` tornaria este o funil PRINCIPAL da conta, "
+            "rebaixando o que o cliente já usa — e o Kommo recusa mesmo assim. "
+            "Crie com is_main false; se o usuário quiser mesmo trocar o funil "
+            "principal, isso é feito depois, na tela do Kommo."
+        )
+    corpo["is_main"] = False
+    corpo["is_unsorted_on"] = True
+
+    etapas = (corpo.get("_embedded") or {}).get("statuses")
+    if not etapas:
+        return None, (
+            "erro: o Kommo recusa criar funil sem etapa. Mande `_embedded.statuses` "
+            "com pelo menos a primeira etapa (só `name` e `sort`)."
+        )
+    if any(e.get("descriptions") for e in etapas if isinstance(e, dict)):
+        return None, (
+            "erro: a criação de funil IGNORA as dicas — o funil nasceria sem elas e "
+            "você acharia que deu certo. Faça assim: 1) kommo_criar_funil só com a "
+            "PRIMEIRA etapa, sem `descriptions`; 2) kommo_adicionar_etapas com todas "
+            "as outras de uma vez, cada uma com seu `descriptions` (essa grava a "
+            "dica junto); 3) kommo_atualizar_etapa só na primeira, pra dar a dica dela."
+        )
+
+    return {"funil_json": json.dumps(corpo, ensure_ascii=False)}, None
+
+
 def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: int) -> str:
     try:
         if nome in FERRAMENTAS_ESTRUTURAIS:
@@ -542,6 +607,11 @@ def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: in
         if nome.startswith("kommo_"):
             credenciais = n8n_edicao.ler_credenciais_kommo(workflow_id)
             args = _normalizar_args_kommo(args)
+            if nome == "kommo_criar_funil":
+                args, erro = _guarda_criar_funil(args)
+                if erro:
+                    db.registrar_log(cliente_id, "sistema", f"Bloqueado: {erro}")
+                    return erro
             if nome == "kommo_atualizar_etapa":
                 args, erro = _guarda_etapa_kommo(args, credenciais)
                 if erro:

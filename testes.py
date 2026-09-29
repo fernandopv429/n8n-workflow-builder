@@ -466,6 +466,47 @@ def teste_trava_diz_quais_niveis_sobraram():
         assert espera in erro, f"esperava '{espera}' em: {erro}"
 
 
+# --- trava do kommo_criar_funil ---------------------------------------------
+
+def teste_criar_funil_completa_campos_obrigatorios():
+    """O Kommo só cria funil com is_main false E is_unsorted_on true juntos;
+    faltando qualquer um responde só "Bad request" (testado 29/09/2026)."""
+    import agente_chat
+    corr, erro = agente_chat._guarda_criar_funil({"funil_json": json.dumps(
+        {"name": "X", "_embedded": {"statuses": [{"name": "Etapa", "sort": 10}]}})})
+    assert erro is None, erro
+    corpo = json.loads(corr["funil_json"])
+    assert corpo["is_main"] is False and corpo["is_unsorted_on"] is True, corpo
+
+
+def teste_criar_funil_aceita_campos_soltos():
+    """O modelo manda os campos do funil soltos em vez de dentro de funil_json."""
+    import agente_chat
+    corr, erro = agente_chat._guarda_criar_funil(
+        {"name": "X", "sort": 10, "_embedded": {"statuses": [{"name": "E", "sort": 10}]}})
+    assert erro is None, erro
+    assert json.loads(corr["funil_json"])["name"] == "X"
+
+
+def teste_criar_funil_barra_is_main_e_funil_sem_etapa():
+    import agente_chat
+    etapas = {"_embedded": {"statuses": [{"name": "E", "sort": 10}]}}
+    _, erro = agente_chat._guarda_criar_funil({"name": "X", "is_main": True, **etapas})
+    assert erro and "PRINCIPAL" in erro, erro
+    _, erro = agente_chat._guarda_criar_funil({"name": "X"})
+    assert erro and "sem etapa" in erro, erro
+
+
+def teste_criar_funil_barra_dica_na_criacao():
+    """Criar funil IGNORA descriptions: o funil nasceria mudo e o modelo diria
+    que deu certo. A trava obriga a receita de 3 chamadas."""
+    import agente_chat
+    _, erro = agente_chat._guarda_criar_funil({"name": "X", "_embedded": {"statuses": [
+        {"name": "E", "sort": 10,
+         "descriptions": [{"level": "newbie", "description": "dica"}]}]}})
+    assert erro and "kommo_adicionar_etapas" in erro, erro
+
+
 TESTES = [
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
@@ -493,6 +534,10 @@ TESTES = [
     teste_trava_deixa_criar_dica_de_nivel_vazio,
     teste_trava_rejeita_nivel_de_dica_invalido,
     teste_trava_diz_quais_niveis_sobraram,
+    teste_criar_funil_completa_campos_obrigatorios,
+    teste_criar_funil_aceita_campos_soltos,
+    teste_criar_funil_barra_is_main_e_funil_sem_etapa,
+    teste_criar_funil_barra_dica_na_criacao,
 ]
 
 
