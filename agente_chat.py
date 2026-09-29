@@ -290,17 +290,33 @@ def _system_prompt(cliente: dict) -> str:
         "- Se uma chamada falhar, não repita a mesma coisa esperando resultado "
         "diferente: leia o erro, mude o que ele aponta, ou diga o que falta.\n\n"
 
-        "ARMADILHAS CONHECIDAS DO KOMMO (não descubra de novo na tentativa e erro):\n"
-        "- COR de etapa: o Kommo só aceita uma paleta fechada e não documentada. "
-        "Hex 'óbvios' como #800080 (roxo) e #ffffff (branco) são RECUSADOS. "
-        "Por padrão OMITA o campo `color` — a etapa nasce com #fffeb2 e o usuário "
-        "ajusta a cor na tela do Kommo. Se ele insistir numa cor, avise disso.\n"
+        "ARMADILHAS CONHECIDAS DO KOMMO (confirmadas na doc oficial em 29/09/2026,\n"
+        "não descubra de novo na tentativa e erro):\n"
+        "- `status_id` é o campo `id` da etapa (ex: 112332268), NÃO o `sort` nem a "
+        "posição dela no funil. Confundir os dois é o erro que mais apareceu nos logs: "
+        "mandar sort 30 como status_id faz o Kommo responder um 'Bad request' que não "
+        "explica nada. Pegue o `id` em `kommo_listar_funis` ou `kommo_ver_etapa`.\n"
+        "- Três etapas vêm com `is_editable: false` e NÃO aceitam edição nem exclusão: "
+        "a de leads de entrada (`type: 1`), a 142 (Venda ganha) e a 143 (Venda perdida). "
+        "Se o usuário pedir pra mexer nelas, explique que o Kommo não permite.\n"
         "- Parâmetros terminados em `_json` (etapas_json, etapa_json...) são "
         "STRING contendo JSON, não objeto.\n"
-        "- `sort` é sugestão: o Kommo renumera as etapas: não prometa a posição "
-        "exata, confirme lendo depois.\n"
-        "- Ao atualizar etapa, mande `name` junto mesmo que não vá mudá-lo — "
-        "atualização sem `name` APAGA o nome da etapa.\n"
+        "- Ao atualizar etapa, mande SEMPRE `name` E `sort` juntos, com os valores "
+        "atuais, mesmo que não vá mudá-los. Sem `name` o Kommo APAGA o nome; sem "
+        "`sort` ele renumera a etapa e ela troca de lugar no funil.\n"
+        "- DESCRIÇÃO/dica de etapa: o campo é `descriptions` no PLURAL e é um ARRAY "
+        "de objetos. `level` só aceita 'newbie', 'candidate' ou 'master', no máximo "
+        "3 por etapa (um por nível), 1000 caracteres cada. Não existe `description` no "
+        "singular. Formato: etapa_json = {\"name\": \"Agendamento\", \"sort\": 30, "
+        "\"descriptions\": [{\"level\": \"newbie\", \"description\": \"texto\"}]}\n"
+        "- `kommo_listar_funis` NÃO traz as descrições das etapas, mesmo quando existem. "
+        "Use `kommo_ver_etapa` pra ler uma etapa com as descrições antes de atualizá-la "
+        "(assim você reaproveita name/sort/descrições atuais em vez de apagá-los).\n"
+        "- COR de etapa: a paleta é fechada. Só estes 21 valores são aceitos — #fffeb2 "
+        "#fffd7f #fff000 #ffeab2 #ffdc7f #ffce5a #ffdbdb #ffc8c8 #ff8f92 #d6eaff #c1e0ff "
+        "#98cbff #ebffb1 #deff81 #87f2c0 #f9deff #f3beff #ccc8f9 #eb93ff #f2f3f4 #e6e8ea. "
+        "Qualquer outro hex é recusado (#800080 e #ffffff, por exemplo). Se o usuário "
+        "pedir uma cor fora da lista, ofereça a mais próxima em vez de tentar.\n"
         "- Tags de lead: o PATCH substitui a lista INTEIRA. Leia as tags atuais "
         "e reenvie todas, senão as que faltarem são removidas.\n"
         "- O Kommo às vezes devolve erro tendo gravado assim mesmo. Antes de "
@@ -327,6 +343,101 @@ def _normalizar_args_kommo(args: dict) -> dict:
 
 
 FERRAMENTAS_ESTRUTURAIS = ("atualizar_node", "criar_node", "remover_node", "atualizar_connections")
+
+
+# Etapas que o Kommo marca com is_editable=false e recusa qualquer PATCH/DELETE
+# (doc: pipelines-e-estágios-de-leads). 142/143 são iguais em toda conta.
+ETAPAS_RESERVADAS = {142, 143}
+
+# Paleta fechada de cores de etapa (doc: cores-de-etapa-disponiveis). Contas
+# antigas têm etapas com cores fora desta lista (#ffff99, #99ccff, #c1c1c1...)
+# que o Kommo mostra mas RECUSA se você reenviar — reenviar a cor atual de uma
+# etapa dessas derruba o PATCH inteiro com "Bad request".
+CORES_ETAPA_KOMMO = {
+    "#fffeb2", "#fffd7f", "#fff000", "#ffeab2", "#ffdc7f", "#ffce5a", "#ffdbdb",
+    "#ffc8c8", "#ff8f92", "#d6eaff", "#c1e0ff", "#98cbff", "#ebffb1", "#deff81",
+    "#87f2c0", "#f9deff", "#f3beff", "#ccc8f9", "#eb93ff", "#f2f3f4", "#e6e8ea",
+}
+
+
+def _guarda_etapa_kommo(args: dict, credenciais: dict) -> tuple:
+    """Confere o `status_id` ANTES de deixar o PATCH sair.
+
+    Em 29/09/2026 o chat renomeou a etapa "Contato inicial" para "MIA" porque
+    chutou o id: leu a etapa, viu que era outra, e gravou por cima assim mesmo.
+    Nenhum texto de prompt segurou isso em dois testes seguidos — então a
+    checagem vira código.
+
+    Também completa `sort` e `color` quando o modelo omite: o Kommo trata um
+    PATCH como substituição, e sem esses campos ele renumera a etapa (ela troca
+    de lugar no funil) e reseta a cor pro amarelo padrão.
+
+    Devolve (args_corrigidos, None) pra seguir, ou (None, "erro: ...") pra
+    barrar e explicar ao modelo o que fazer.
+    """
+    try:
+        status_id = int(args.get("status_id", 0))
+        pipeline_id = int(args.get("pipeline_id", 0))
+    except (TypeError, ValueError):
+        return None, "erro: pipeline_id e status_id precisam ser numéricos"
+
+    if status_id in ETAPAS_RESERVADAS:
+        return None, (
+            f"erro: a etapa {status_id} é reservada do Kommo (Venda ganha/perdida) "
+            "e não aceita edição. Avise o usuário em vez de tentar de novo."
+        )
+
+    bruto = mcp_kommo_client.chamar_ferramenta(
+        "kommo_ver_etapa", {"pipeline_id": pipeline_id, "status_id": status_id, **credenciais}
+    )
+    try:
+        atual = json.loads(json.loads(bruto)[0]["data"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None, (
+            f"erro: não consegui confirmar que a etapa {status_id} existe no funil "
+            f"{pipeline_id}. Chame kommo_listar_funis e use o campo `id` da etapa "
+            "(não o `sort`) antes de tentar de novo."
+        )
+
+    if atual.get("is_editable") is False or atual.get("type") == 1:
+        return None, (
+            f"erro: a etapa {status_id} ('{atual.get('name')}') não é editável no Kommo "
+            "(é a etapa de leads de entrada ou uma etapa de sistema). Avise o usuário."
+        )
+
+    try:
+        corpo = json.loads(args.get("etapa_json") or "{}")
+    except json.JSONDecodeError:
+        return None, "erro: etapa_json não é um JSON válido"
+    if not isinstance(corpo, dict):
+        return None, "erro: etapa_json precisa ser um objeto, não uma lista"
+
+    nome_pedido, nome_atual = corpo.get("name"), atual.get("name")
+    if nome_pedido and nome_pedido != nome_atual and not corpo.pop("confirmar_renomear", False):
+        return None, (
+            f"erro: a etapa {status_id} se chama '{nome_atual}', não '{nome_pedido}'. "
+            "Se era outra etapa que você queria, pegue o `id` certo em kommo_listar_funis. "
+            f"Se a intenção era mesmo RENOMEAR '{nome_atual}' para '{nome_pedido}', "
+            'reenvie incluindo "confirmar_renomear": true no etapa_json.'
+        )
+    corpo.pop("confirmar_renomear", None)
+
+    # o PATCH substitui: o que não for reenviado, o Kommo redefine
+    corpo.setdefault("name", nome_atual)
+    corpo.setdefault("sort", atual.get("sort"))
+    cor_atual = (atual.get("color") or "").lower()
+    if cor_atual in CORES_ETAPA_KOMMO:
+        corpo.setdefault("color", cor_atual)
+    # cor fora da paleta: não dá pra preservar nem reenviar — o Kommo recusaria.
+    # Omitir deixa a etapa cair no #fffeb2 padrão; é o único caminho que grava.
+
+    if corpo.get("color") and str(corpo["color"]).lower() not in CORES_ETAPA_KOMMO:
+        return None, (
+            f"erro: a cor {corpo['color']} não está na paleta aceita pelo Kommo. "
+            "Valores válidos: " + " ".join(sorted(CORES_ETAPA_KOMMO))
+        )
+
+    return {**args, "etapa_json": json.dumps(corpo, ensure_ascii=False)}, None
 
 
 def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: int) -> str:
@@ -385,19 +496,48 @@ def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: in
             )
         if nome.startswith("kommo_"):
             credenciais = n8n_edicao.ler_credenciais_kommo(workflow_id)
-            return mcp_kommo_client.chamar_ferramenta(nome, {**_normalizar_args_kommo(args), **credenciais})
+            args = _normalizar_args_kommo(args)
+            if nome == "kommo_atualizar_etapa":
+                args, erro = _guarda_etapa_kommo(args, credenciais)
+                if erro:
+                    db.registrar_log(cliente_id, "sistema", f"Bloqueado: {erro}")
+                    return erro
+                db.registrar_log(
+                    cliente_id, "sistema",
+                    f"Corpo enviado ao Kommo após a verificação: {args['etapa_json']}",
+                )
+            return mcp_kommo_client.chamar_ferramenta(nome, {**args, **credenciais})
         return f"erro: ferramenta desconhecida '{nome}'"
     except Exception as e:  # noqa: BLE001 — devolve pro modelo como resultado da tool, não derruba o chat
         return f"erro: {e}"
 
 
+# Quantos turnos do histórico vão pro modelo. Mandar a conversa inteira parece
+# generoso, mas em 29/09/2026 foi o que fez o chat errar a etapa do Kommo: a
+# conversa carregava dezenas de tentativas frustradas com IDs errados, e o
+# modelo repescava aqueles números em vez de consultar o funil. Com o histórico
+# cortado ele acerta de primeira (listar_funis -> ver_etapa -> atualizar).
+# Também segura o custo por turno, que antes crescia sem teto.
+MAX_TURNOS_HISTORICO = 12
+
+
 def _contexto_conversa(cliente: dict) -> list:
-    historico = db.listar_mensagens(cliente["id"])
-    mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
-    mensagens += [
-        {"role": m["role"], "content": m["conteudo"]}
-        for m in historico if m["role"] in ("user", "assistant")
+    historico = [
+        m for m in db.listar_mensagens(cliente["id"])
+        if m["role"] in ("user", "assistant")
     ]
+    mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
+    recortado = historico[-MAX_TURNOS_HISTORICO:]
+    if len(historico) > len(recortado):
+        mensagens.append({
+            "role": "system",
+            "content": (
+                f"[{len(historico) - len(recortado)} mensagens mais antigas desta "
+                "conversa foram omitidas. Não reaproveite IDs, nomes de etapa ou "
+                "resultados citados antes: consulte o estado atual pelas ferramentas.]"
+            ),
+        })
+    mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in recortado]
     return mensagens
 
 

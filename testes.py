@@ -302,6 +302,105 @@ def teste_nao_deixa_renomear_nodes_protegidos():
             raise AssertionError(f"deveria ter recusado renomear PARA '{protegido}'")
 
 
+# --- trava do kommo_atualizar_etapa (agente_chat._guarda_etapa_kommo) ---------
+# Em 29/09/2026 o chat renomeou a etapa "Contato inicial" para "MIA" porque
+# chutou o status_id, e em outra tentativa mandou PATCH pra etapa 142 e pra de
+# leads de entrada. Prompt não segurou; estes testes cobrem a trava que segura.
+
+def _etapa_falsa(**campos):
+    """Dubla o kommo_ver_etapa: devolve no formato que o MCP realmente usa
+    ([{"data": "<string JSON>"}]), pra trava ser testada contra o formato de
+    verdade e não contra um dict conveniente."""
+    padrao = {"id": 99116543, "name": "Oferta feita", "sort": 50,
+              "is_editable": True, "type": 0, "color": "#ffff99"}
+    padrao.update(campos)
+    return json.dumps([{"data": json.dumps(padrao)}])
+
+
+def _com_mcp_dublado(resposta):
+    import agente_chat, mcp_kommo_client
+    original = mcp_kommo_client.chamar_ferramenta
+    mcp_kommo_client.chamar_ferramenta = lambda nome, args: resposta
+    return agente_chat, original
+
+
+def _restaura(original):
+    import mcp_kommo_client
+    mcp_kommo_client.chamar_ferramenta = original
+
+
+def teste_trava_barra_patch_na_etapa_errada():
+    ac, orig = _com_mcp_dublado(_etapa_falsa(name="Contato inicial"))
+    try:
+        corr, erro = ac._guarda_etapa_kommo(
+            {"pipeline_id": 1, "status_id": 99116539,
+             "etapa_json": json.dumps({"name": "MIA", "sort": 15})}, {})
+    finally:
+        _restaura(orig)
+    assert corr is None, "devia ter barrado o PATCH na etapa errada"
+    assert "Contato inicial" in erro and "MIA" in erro, erro
+
+
+def teste_trava_deixa_renomear_quando_confirmado():
+    ac, orig = _com_mcp_dublado(_etapa_falsa(name="Contato inicial", color="#98cbff"))
+    try:
+        corr, erro = ac._guarda_etapa_kommo(
+            {"pipeline_id": 1, "status_id": 99116539,
+             "etapa_json": json.dumps({"name": "MIA", "confirmar_renomear": True})}, {})
+    finally:
+        _restaura(orig)
+    assert erro is None, erro
+    corpo = json.loads(corr["etapa_json"])
+    assert corpo["name"] == "MIA", corpo
+    assert "confirmar_renomear" not in corpo, "flag interna não pode vazar pro Kommo"
+
+
+def teste_trava_barra_etapas_que_o_kommo_nao_edita():
+    for status_id, dublê, motivo in (
+        (142, _etapa_falsa(), "reservada"),
+        (99116535, _etapa_falsa(id=99116535, name="Incoming leads", type=1,
+                                is_editable=False), "leads de entrada"),
+    ):
+        ac, orig = _com_mcp_dublado(dublê)
+        try:
+            corr, erro = ac._guarda_etapa_kommo(
+                {"pipeline_id": 1, "status_id": status_id,
+                 "etapa_json": json.dumps({"name": "x"})}, {})
+        finally:
+            _restaura(orig)
+        assert corr is None, f"devia barrar etapa {motivo}"
+
+
+def teste_trava_completa_sort_e_omite_cor_legada():
+    """Sem `sort` a etapa troca de lugar no funil; com a cor legada (#ffff99,
+    que o Kommo mostra mas recusa na escrita) o PATCH inteiro é rejeitado."""
+    ac, orig = _com_mcp_dublado(_etapa_falsa(color="#ffff99"))
+    try:
+        corr, erro = ac._guarda_etapa_kommo(
+            {"pipeline_id": 1, "status_id": 99116543,
+             "etapa_json": json.dumps({"descriptions": [
+                 {"level": "newbie", "description": "dica"}]})}, {})
+    finally:
+        _restaura(orig)
+    assert erro is None, erro
+    corpo = json.loads(corr["etapa_json"])
+    assert corpo["sort"] == 50, "sort atual tinha que ser reposto"
+    assert corpo["name"] == "Oferta feita", "name atual tinha que ser reposto"
+    assert "color" not in corpo, "cor fora da paleta não pode ser reenviada"
+
+
+def teste_trava_preserva_cor_valida():
+    ac, orig = _com_mcp_dublado(_etapa_falsa(color="#98cbff"))
+    try:
+        corr, erro = ac._guarda_etapa_kommo(
+            {"pipeline_id": 1, "status_id": 99116543,
+             "etapa_json": json.dumps({"sort": 55})}, {})
+    finally:
+        _restaura(orig)
+    assert erro is None, erro
+    assert json.loads(corr["etapa_json"])["color"] == "#98cbff"
+
+
 TESTES = [
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
@@ -320,6 +419,11 @@ TESTES = [
     teste_renomear_node_atualiza_expressoes,
     teste_renomear_node_atualiza_connections,
     teste_nao_deixa_renomear_nodes_protegidos,
+    teste_trava_barra_patch_na_etapa_errada,
+    teste_trava_deixa_renomear_quando_confirmado,
+    teste_trava_barra_etapas_que_o_kommo_nao_edita,
+    teste_trava_completa_sort_e_omite_cor_legada,
+    teste_trava_preserva_cor_valida,
 ]
 
 
