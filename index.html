@@ -119,6 +119,34 @@
   small.hint { color: var(--muted); display: block; margin-top: 4px; }
   .opcional { color: var(--muted); font-weight: 400; }
 
+  /* Atendimento e saúde da fila */
+  .contato-linha {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border-top: 1px solid var(--border); cursor: pointer;
+  }
+  .contato-linha:hover { background: var(--card); }
+  .contato-quem { flex: 0 0 170px; font-weight: 500; }
+  .contato-fala { flex: 1; color: var(--muted); overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+  .etiqueta { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+  .etiqueta.humano { border-color: #b78a2e; color: #e0b457; }
+  .etiqueta.ia { color: var(--muted); }
+  .contato-conversa { padding: 10px 12px 14px; border-top: 1px solid var(--border); }
+  .contato-conversa .msg { margin-bottom: 6px; }
+  /* Aviso de fila: só aparece quando há algo errado — banner permanente vira
+     paisagem e ninguém mais lê. */
+  .handoff-botao {
+    margin-top: 10px; padding: 7px 12px; border-radius: 6px; cursor: pointer;
+    background: none; border: 1px solid var(--border); color: var(--text); font-size: 12px;
+  }
+  .handoff-botao:hover { border-color: var(--accent); }
+
+  .aviso-fila {
+    border: 1px solid #b78a2e; background: rgba(183,138,46,.08);
+    color: #e0b457; border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
+    font-size: 13px; line-height: 1.5;
+  }
+
   /* tela de gerenciamento: logs + engrenagem + chat */
   .gerenciamento-topo { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; flex: 0 0 auto; }
   .logs-caixa { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; flex: 1; max-height: 160px; overflow-y: auto; }
@@ -193,6 +221,7 @@
 <main class="pagina-estreita">
 
   <section id="dashboard">
+    <div id="aviso-fila"></div>
     <div class="grid" id="grid-clientes"></div>
   </section>
 
@@ -228,6 +257,15 @@
   </div>
 
   <div class="briefing-caixa" id="briefing-caixa" style="display:none"></div>
+
+  <!-- Atendimento: as conversas do agente com os pacientes. Separado do chat
+       abaixo, que é você falando SOBRE o cliente, não COM o paciente dele. -->
+  <div class="logs-caixa" id="atendimento-caixa" style="display:none">
+    <button type="button" class="logs-titulo" id="botao-atendimento">
+      Atendimento <span id="atendimento-resumo" class="opcional"></span> <span class="seta">&#9656;</span>
+    </button>
+    <div id="atendimento-lista" style="display:none"></div>
+  </div>
 
   <div class="chat-area vazio" id="chat-area"></div>
   <div class="linha chat-opcao-lote">
@@ -322,6 +360,7 @@ function mostrarDashboard() {
   containerEstreito.style.display = 'block';
   dashboard.style.display = 'block';
   carregarClientes();
+  carregarAvisoFila();
 }
 
 function mostrarPasso1() {
@@ -339,6 +378,7 @@ async function abrirGerenciamento(id) {
   telaGerenciamento.style.display = 'flex';
   await carregarLogs();
   await carregarBriefing();
+  await carregarAtendimento();
   await carregarChat();
 }
 
@@ -667,6 +707,77 @@ function renderizarMensagens(mensagens) {
     m => `<div class="msg ${m.role}">${escaparHtml(m.conteudo)}</div>`
   ).join('');
   area.scrollTop = area.scrollHeight;
+}
+
+// --- Atendimento: conversas do agente com os pacientes ---------------------
+// Separado do chat do painel de propósito: lá você fala SOBRE o cliente, aqui
+// você vê o que o agente falou COM o paciente dele.
+
+async function carregarAtendimento() {
+  const caixa = document.getElementById('atendimento-caixa');
+  const lista = document.getElementById('atendimento-lista');
+  const resumo = document.getElementById('atendimento-resumo');
+  let contatos = [];
+  try {
+    ({ contatos } = await (await fetch(`/clientes/${clienteAtualId}/contatos`)).json());
+  } catch (e) { return; }
+
+  if (!contatos.length) { caixa.style.display = 'none'; return; }
+  caixa.style.display = 'block';
+  const humanos = contatos.filter(c => c.status === 'HUMANO').length;
+  resumo.textContent = `(${contatos.length} ${contatos.length === 1 ? 'conversa' : 'conversas'}` +
+    (humanos ? `, ${humanos} com atendente` : '') + ')';
+
+  lista.innerHTML = contatos.map(c => `
+    <div class="contato-linha" data-contato="${c.id}">
+      <span class="contato-quem">${escaparHtml(c.nome || c.id_whatsapp)}</span>
+      <span class="etiqueta ${c.status === 'HUMANO' ? 'humano' : 'ia'}">
+        ${c.status === 'HUMANO' ? 'atendente' : 'IA'}</span>
+      <span class="contato-fala">${escaparHtml(c.ultima_fala || '')}</span>
+    </div>
+    <div class="contato-conversa" id="conversa-${c.id}" style="display:none"></div>
+  `).join('');
+
+  lista.querySelectorAll('.contato-linha').forEach(linha => {
+    linha.addEventListener('click', () => abrirConversa(linha.dataset.contato));
+  });
+}
+
+async function abrirConversa(contatoId) {
+  const caixa = document.getElementById(`conversa-${contatoId}`);
+  if (caixa.style.display !== 'none') { caixa.style.display = 'none'; return; }
+  caixa.style.display = 'block';
+  caixa.textContent = 'carregando…';
+
+  const { contato, mensagens } = await (await fetch(`/contatos/${contatoId}/mensagens`)).json();
+  const assumir = contato.status !== 'HUMANO';
+  caixa.innerHTML =
+    mensagens.map(m => `<div class="msg ${m.role}">${escaparHtml(m.conteudo)}</div>`).join('') +
+    `<button type="button" class="handoff-botao" id="handoff-${contatoId}">` +
+    (assumir ? 'Assumir — o agente para de responder' : 'Devolver para a IA') + '</button>';
+
+  document.getElementById(`handoff-${contatoId}`).addEventListener('click', async () => {
+    await fetch(`/contatos/${contatoId}/status`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: assumir ? 'HUMANO' : 'IA' }),
+    });
+    await carregarAtendimento();
+    await carregarLogs();
+  });
+}
+
+// --- Saúde da fila ---------------------------------------------------------
+// Só desenha quando há alerta. Banner permanente vira paisagem e deixa de ser
+// lido justamente no dia em que importa.
+async function carregarAvisoFila() {
+  const caixa = document.getElementById('aviso-fila');
+  if (!caixa) return;
+  let dados;
+  try { dados = await (await fetch('/fila')).json(); } catch (e) { return; }
+  const alertas = dados.disponivel ? (dados.alertas || []) : [];
+  if (!dados.disponivel && dados.motivo) alertas.push(dados.motivo);
+  caixa.innerHTML = alertas.length
+    ? `<div class="aviso-fila">${alertas.map(escaparHtml).join('<br>')}</div>` : '';
 }
 
 async function carregarChat() {

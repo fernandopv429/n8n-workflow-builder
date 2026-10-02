@@ -177,6 +177,50 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
     return dict(zip(campos, linha))
 
 
+def listar_contatos(cliente_id: int, limite: int = 100) -> list:
+    """Quem está conversando com o agente deste cliente, mais recente primeiro.
+
+    Traz a última mensagem junto porque a tela sem ela é inútil: uma lista de
+    telefones não diz a quem o operador precisa atender primeiro.
+    """
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT c.id, c.id_whatsapp, c.nome, c.status, c.ultima_mensagem,
+                   (SELECT conteudo FROM agente_mensagens m
+                     WHERE m.contato_id = c.id ORDER BY m.criado_em DESC LIMIT 1),
+                   (SELECT count(*) FROM agente_mensagens m WHERE m.contato_id = c.id)
+              FROM contatos c
+             WHERE c.cliente_id = %s
+             ORDER BY c.ultima_mensagem DESC NULLS LAST
+             LIMIT %s
+            """,
+            (cliente_id, limite),
+        ).fetchall()
+    campos = ("id", "id_whatsapp", "nome", "status", "ultima_mensagem",
+              "ultima_fala", "total_mensagens")
+    # isoformat como o resto do módulo (listar_logs, listar_mensagens): datetime
+    # cru estoura no json.dumps da resposta e derruba a conexão sem explicação
+    return [
+        {**dict(zip(campos, l)),
+         "ultima_mensagem": l[4].isoformat() if l[4] else None}
+        for l in linhas
+    ]
+
+
+def obter_contato(contato_id: int) -> dict | None:
+    with _conectar() as conn:
+        l = conn.execute(
+            "SELECT id, cliente_id, id_whatsapp, nome, status, ultima_mensagem "
+            "FROM contatos WHERE id = %s", (contato_id,)
+        ).fetchone()
+    if l is None:
+        return None
+    d = dict(zip(("id", "cliente_id", "id_whatsapp", "nome", "status", "ultima_mensagem"), l))
+    d["ultima_mensagem"] = l[5].isoformat() if l[5] else None
+    return d
+
+
 def definir_status_contato(contato_id: int, status: str):
     """'HUMANO' tira o contato do atendimento automático — é o handoff. O worker
     confere isso ANTES de responder, senão a IA fala por cima do atendente."""

@@ -46,6 +46,7 @@ import agente_chat  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
+import monitor_fila  # noqa: E402
 import n8n_edicao  # noqa: E402
 import openai_admin  # noqa: E402
 import pocketbase_client  # noqa: E402
@@ -75,6 +76,13 @@ ROTA_CLIENTE_MENSAGENS = re.compile(r"^/clientes/(\d+)/mensagens$")
 ROTA_CLIENTE_CHAT = re.compile(r"^/clientes/(\d+)/chat$")
 ROTA_CLIENTE_APLICAR_PROMPT = re.compile(r"^/clientes/(\d+)/aplicar-prompt$")
 ROTA_CLIENTE_IMAGEM = re.compile(r"^/clientes/(\d+)/imagem$")
+# Atendimento (ARQUITETURA-AGENTE.md): conversas do agente com os pacientes,
+# separadas do chat do painel — que é o operador falando SOBRE o cliente.
+ROTA_CLIENTE_CONTATOS = re.compile(r"^/clientes/(\d+)/contatos$")
+ROTA_CONTATO_MENSAGENS = re.compile(r"^/contatos/(\d+)/mensagens$")
+ROTA_CONTATO_STATUS = re.compile(r"^/contatos/(\d+)/status$")
+ROTA_FILA = re.compile(r"^/fila$")
+ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
 
 
 def _com_imagem(cliente: dict) -> dict:
@@ -216,6 +224,38 @@ class Handler(BaseHTTPRequestHandler):
                 "mensagens": db.listar_mensagens(cliente_id),
                 "lotes_pendentes": len(db.listar_lotes_chat_pendentes(cliente_id)),
             })
+            return
+
+        m = ROTA_CLIENTE_CONTATOS.match(self.path)
+        if m:
+            self._responder_json(200, {"contatos": db.listar_contatos(int(m.group(1)))})
+            return
+
+        m = ROTA_CONTATO_MENSAGENS.match(self.path)
+        if m:
+            contato_id = int(m.group(1))
+            contato = db.obter_contato(contato_id)
+            if contato is None:
+                self._responder_json(404, {"error": "contato não encontrado"})
+                return
+            self._responder_json(200, {
+                "contato": contato,
+                "mensagens": db.listar_mensagens_agente(contato_id, limite=200),
+            })
+            return
+
+        if ROTA_FILA.match(self.path):
+            self._responder_json(200, monitor_fila.resumo())
+            return
+
+        m = ROTA_CLIENTE_CONSUMO.match(self.path)
+        if m:
+            cliente = db.obter_cliente(int(m.group(1)))
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            self._responder_json(200, openai_admin.consumo_do_projeto(
+                cliente.get("openai_projeto_id") or ""))
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)
@@ -500,6 +540,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CONTATO_STATUS.match(self.path)
+        if m:
+            contato_id = int(m.group(1))
+            contato = db.obter_contato(contato_id)
+            if contato is None:
+                self._responder_json(404, {"error": "contato não encontrado"})
+                return
+            status = (self._ler_corpo().get("status") or "").upper()
+            if status not in ("IA", "HUMANO"):
+                self._responder_json(400, {"error": "status deve ser IA ou HUMANO"})
+                return
+            db.definir_status_contato(contato_id, status)
+            # Fica no log do cliente porque é uma mudança com efeito visível pro
+            # paciente: em HUMANO o agente para de responder, e sem registro
+            # ninguém lembra quem silenciou a conversa nem quando.
+            db.registrar_log(
+                contato["cliente_id"], "sistema",
+                f"Atendimento de {contato['id_whatsapp']} passou para "
+                f"{'ATENDENTE HUMANO (o agente não responde mais)' if status == 'HUMANO' else 'IA'}.",
+            )
+            self._responder_json(200, {"status": status})
             return
 
         m = ROTA_CLIENTE_CREDENCIAIS.match(self.path)

@@ -107,6 +107,67 @@ def listar_projetos(limite: int = 100) -> list:
     return _chamar("GET", f"/projects?limit={limite}").get("data", [])
 
 
+def consumo_do_projeto(projeto_id: str, dias: int = 30) -> dict:
+    """Quanto este cliente consumiu: US$ no período e tokens por modelo.
+
+    Só é possível porque cada cliente tem projeto próprio desde 29/09/2026 —
+    antes toda a organização usava um projeto só, e a pergunta "quanto esse
+    cliente custa" não tinha resposta.
+
+    Devolve `disponivel: False` em vez de levantar exceção: isto alimenta uma
+    tela, e cliente antigo (sem projeto) ou Admin API fora do ar são informação,
+    não erro do painel.
+    """
+    import time
+
+    if not projeto_id:
+        return {"disponivel": False,
+                "motivo": "este cliente não tem projeto próprio na OpenAI — foi "
+                          "criado antes da separação por cliente, ou com chave colada à mão.",
+                "dias": dias}
+    if not disponivel():
+        return {"disponivel": False, "motivo": "OPENAI_ADMIN_KEY não configurada", "dias": dias}
+
+    inicio = int(time.time()) - dias * 24 * 3600
+    try:
+        custos = _chamar(
+            "GET", f"/costs?start_time={inicio}&group_by[]=project_id&limit=180")
+        uso = _chamar(
+            "GET",
+            f"/usage/completions?start_time={inicio}&group_by[]=project_id"
+            f"&group_by[]=model&limit=180")
+    except OpenAiAdminError as e:
+        return {"disponivel": False, "motivo": str(e), "dias": dias}
+
+    total = 0.0
+    for balde in custos.get("data", []):
+        for r in balde.get("results", []):
+            if r.get("project_id") == projeto_id:
+                total += float((r.get("amount") or {}).get("value") or 0)
+
+    por_modelo = {}
+    for balde in uso.get("data", []):
+        for r in balde.get("results", []):
+            if r.get("project_id") != projeto_id:
+                continue
+            m = por_modelo.setdefault(
+                r.get("model") or "?",
+                {"entrada": 0, "saida": 0, "cache": 0, "requisicoes": 0})
+            m["entrada"] += r.get("input_tokens") or 0
+            m["saida"] += r.get("output_tokens") or 0
+            m["cache"] += r.get("input_cached_tokens") or 0
+            m["requisicoes"] += r.get("num_model_requests") or 0
+
+    return {
+        "disponivel": True,
+        "dias": dias,
+        "projeto_id": projeto_id,
+        "custo_usd": round(total, 4),
+        "por_modelo": [{"modelo": k, **v} for k, v in
+                       sorted(por_modelo.items(), key=lambda kv: -kv[1]["entrada"])],
+    }
+
+
 if __name__ == "__main__":  # diagnóstico: só leitura
     if not disponivel():
         raise SystemExit("OPENAI_ADMIN_KEY não configurada")
