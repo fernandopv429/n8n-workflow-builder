@@ -119,6 +119,26 @@
   small.hint { color: var(--muted); display: block; margin-top: 4px; }
   .opcional { color: var(--muted); font-weight: 400; }
 
+  /* Abas da tela de gerenciamento */
+  .consumo-total { font-size: 22px; font-weight: 600; margin: 4px 0 16px; }
+  .tabela-consumo { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tabela-consumo th { text-align: left; color: var(--muted); font-weight: 400;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    border-bottom: 1px solid var(--border); padding: 6px 8px; }
+  .tabela-consumo td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+
+  .abas { display: flex; gap: 2px; flex-wrap: wrap; flex: 1; }
+  .aba {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); font: inherit; font-size: 13px; padding: 6px 12px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .aba:hover { color: var(--text); }
+  .aba.ativa { color: var(--text); border-bottom-color: var(--accent); }
+  /* Os painéis ocupam a altura restante: o chat precisa crescer, e os outros
+     precisam rolar sozinhos em vez de empurrar a página. */
+  .painel-aba { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+
   /* Atendimento e saúde da fila */
   .contato-linha {
     display: flex; align-items: center; gap: 10px; padding: 8px 10px;
@@ -248,26 +268,41 @@
 <section id="tela-gerenciamento" class="pagina-larga">
   <button class="voltar" id="botao-voltar-2">&larr; voltar</button>
 
+  <!-- Abas: a tela acumulou prompt, atendimento, consumo, logs e chat num
+       scroll só. Cada um responde a uma pergunta diferente, e empilhados
+       obrigam a rolar pra achar qualquer coisa. -->
   <div class="gerenciamento-topo">
-    <div class="logs-caixa">
-      <button type="button" class="logs-titulo" id="botao-logs">Logs <span class="seta">&#9656;</span></button>
-      <div class="logs-lista" id="logs-lista" style="display:none"></div>
-    </div>
+    <nav class="abas" id="abas">
+      <button type="button" class="aba ativa" data-aba="chat">Chat</button>
+      <button type="button" class="aba" data-aba="prompt">Prompt</button>
+      <button type="button" class="aba" data-aba="atendimento">
+        Atendimento <span id="atendimento-resumo" class="opcional"></span></button>
+      <button type="button" class="aba" data-aba="consumo">Consumo</button>
+      <button type="button" class="aba" data-aba="logs">Logs</button>
+    </nav>
     <button type="button" class="engrenagem-botao" id="botao-engrenagem" title="Credenciais">&#9881;</button>
   </div>
 
-  <div class="briefing-caixa" id="briefing-caixa" style="display:none"></div>
-
-  <!-- Atendimento: as conversas do agente com os pacientes. Separado do chat
-       abaixo, que é você falando SOBRE o cliente, não COM o paciente dele. -->
-  <div class="logs-caixa" id="atendimento-caixa" style="display:none">
-    <button type="button" class="logs-titulo" id="botao-atendimento">
-      Atendimento <span id="atendimento-resumo" class="opcional"></span> <span class="seta">&#9656;</span>
-    </button>
-    <div id="atendimento-lista" style="display:none"></div>
+  <div class="painel-aba" id="painel-prompt" style="display:none">
+    <div class="briefing-caixa" id="briefing-caixa"></div>
   </div>
 
-  <div class="chat-area vazio" id="chat-area"></div>
+  <!-- Atendimento é o agente falando COM o paciente. O chat é você falando
+       SOBRE o cliente. Misturar os dois já confundiu na tela antiga. -->
+  <div class="painel-aba" id="painel-atendimento" style="display:none">
+    <div id="atendimento-lista"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-consumo" style="display:none">
+    <div id="consumo-conteudo"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-logs" style="display:none">
+    <div class="logs-lista" id="logs-lista"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-chat">
+    <div class="chat-area vazio" id="chat-area"></div>
   <div class="linha chat-opcao-lote">
     <input type="checkbox" id="chat_em_lote" checked disabled>
     <label for="chat_em_lote">Enviar pela Batch API — 50% mais barato, resposta em minutos a horas. Só gera texto (prompt, proposta): não executa nada no n8n nem no Kommo.</label>
@@ -276,6 +311,7 @@
     <input type="text" id="chat-input" placeholder="Converse com o agente" disabled>
     <button type="button" id="chat-enviar" disabled>Enviar</button>
   </div>
+  </div><!-- /painel-chat -->
 </section>
 
 <div class="modal-fundo" id="modal-excluir" style="display:none">
@@ -376,9 +412,8 @@ async function abrirGerenciamento(id) {
   clienteAtualId = id;
   esconderTelas();
   telaGerenciamento.style.display = 'flex';
-  await carregarLogs();
-  await carregarBriefing();
-  await carregarAtendimento();
+  trocarAba('chat');
+  carregarAtendimento();   // só pra contar as conversas no rótulo da aba
   await carregarChat();
 }
 
@@ -730,12 +765,63 @@ function renderizarMensagens(mensagens) {
   area.scrollTop = area.scrollHeight;
 }
 
+// --- Abas ------------------------------------------------------------------
+// Cada painel carrega só quando a aba é aberta: consumo bate na API da OpenAI e
+// atendimento no banco. Carregar os cinco a cada vez que se abre um cliente
+// seria gasto e lentidão por informação que ninguém pediu.
+
+let abaAtual = 'chat';
+
+function trocarAba(nome) {
+  abaAtual = nome;
+  document.querySelectorAll('.aba').forEach(b =>
+    b.classList.toggle('ativa', b.dataset.aba === nome));
+  document.querySelectorAll('.painel-aba').forEach(p =>
+    p.style.display = p.id === `painel-${nome}` ? 'flex' : 'none');
+
+  if (nome === 'logs') carregarLogs();
+  if (nome === 'prompt') carregarBriefing();
+  if (nome === 'atendimento') carregarAtendimento();
+  if (nome === 'consumo') carregarConsumo();
+}
+
+document.getElementById('abas').addEventListener('click', ev => {
+  const b = ev.target.closest('.aba');
+  if (b) trocarAba(b.dataset.aba);
+});
+
+async function carregarConsumo() {
+  const caixa = document.getElementById('consumo-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let d;
+  try { d = await (await fetch(`/clientes/${clienteAtualId}/consumo`)).json(); }
+  catch (e) { caixa.textContent = 'falha ao consultar o consumo.'; return; }
+
+  if (!d.disponivel) { caixa.innerHTML = `<div class="vazio">${escaparHtml(d.motivo)}</div>`; return; }
+
+  const linhas = (d.por_modelo || []).map(m => `
+    <tr><td>${escaparHtml(m.modelo)}</td>
+        <td style="text-align:right">${m.requisicoes.toLocaleString('pt-BR')}</td>
+        <td style="text-align:right">${m.entrada.toLocaleString('pt-BR')}</td>
+        <td style="text-align:right">${m.saida.toLocaleString('pt-BR')}</td>
+        <td style="text-align:right">${m.cache.toLocaleString('pt-BR')}</td></tr>`).join('');
+
+  caixa.innerHTML = `
+    <div class="consumo-total">US$ ${d.custo_usd.toFixed(2)}
+      <span class="opcional">nos últimos ${d.dias} dias</span></div>
+    ${linhas ? `<table class="tabela-consumo">
+      <thead><tr><th>modelo</th><th>chamadas</th><th>entrada</th><th>saída</th><th>cache</th></tr></thead>
+      <tbody>${linhas}</tbody></table>
+      <small class="hint">Tokens em "cache" custam bem menos que os de entrada —
+        é desconto que já está aplicado no valor acima.</small>`
+    : '<div class="vazio">sem uso registrado no período.</div>'}`;
+}
+
 // --- Atendimento: conversas do agente com os pacientes ---------------------
 // Separado do chat do painel de propósito: lá você fala SOBRE o cliente, aqui
 // você vê o que o agente falou COM o paciente dele.
 
 async function carregarAtendimento() {
-  const caixa = document.getElementById('atendimento-caixa');
   const lista = document.getElementById('atendimento-lista');
   const resumo = document.getElementById('atendimento-resumo');
   let contatos = [];
@@ -743,11 +829,16 @@ async function carregarAtendimento() {
     ({ contatos } = await (await fetch(`/clientes/${clienteAtualId}/contatos`)).json());
   } catch (e) { return; }
 
-  if (!contatos.length) { caixa.style.display = 'none'; return; }
-  caixa.style.display = 'block';
+  // o número no rótulo da aba é o que faz alguém reparar que tem gente esperando
   const humanos = contatos.filter(c => c.status === 'HUMANO').length;
-  resumo.textContent = `(${contatos.length} ${contatos.length === 1 ? 'conversa' : 'conversas'}` +
-    (humanos ? `, ${humanos} com atendente` : '') + ')';
+  resumo.textContent = contatos.length
+    ? `(${contatos.length}${humanos ? `, ${humanos} com atendente` : ''})` : '';
+
+  if (!contatos.length) {
+    lista.innerHTML = '<div class="vazio">Nenhuma conversa ainda. ' +
+      'Elas aparecem aqui quando o agente começar a atender no WhatsApp.</div>';
+    return;
+  }
 
   lista.innerHTML = contatos.map(c => `
     <div class="contato-linha" data-contato="${c.id}">
@@ -957,14 +1048,6 @@ async function enviarMensagemChat() {
 document.getElementById('chat-enviar').addEventListener('click', enviarMensagemChat);
 document.getElementById('chat-input').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') enviarMensagemChat();
-});
-
-document.getElementById('botao-logs').addEventListener('click', () => {
-  const lista = document.getElementById('logs-lista');
-  const botao = document.getElementById('botao-logs');
-  const abrindo = lista.style.display === 'none';
-  lista.style.display = abrindo ? 'flex' : 'none';
-  botao.classList.toggle('aberto', abrindo);
 });
 
 async function prepararModalCredenciais() {

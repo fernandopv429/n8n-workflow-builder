@@ -29,7 +29,14 @@ def _credenciais() -> tuple:
 
 def resumo() -> dict:
     """Nunca levanta exceção: isto alimenta uma tela, e broker fora do ar é
-    informação, não motivo pra devolver 500 no painel inteiro."""
+    informação, não motivo pra devolver 500 no painel inteiro.
+
+    Os números atrasam alguns segundos: a API de gerenciamento do RabbitMQ serve
+    estatísticas coletadas em intervalo, não o estado instantâneo da fila
+    (verificado em 02/10/2026 — publiquei uma mensagem e o contador só subiu na
+    consulta seguinte). Para uma tela de acompanhamento isso é irrelevante, mas
+    não serve pra teste automatizado de "publiquei agora, apareceu agora".
+    """
     painel = config.carregar_env().get("RABBITMQ_PAINEL", "").rstrip("/")
     usuario, senha = _credenciais()
     if not painel or not usuario:
@@ -60,10 +67,15 @@ def resumo() -> dict:
     # Dois alertas que valem mais que os números crus, porque descrevem o que
     # está acontecendo com o paciente do outro lado.
     alertas = []
-    if entrada.get("consumidores", 0) == 0:
+    esperando = entrada.get("mensagens", 0)
+    # Avisar de worker ausente enquanto NINGUÉM publica na fila seria alarme
+    # falso desde o primeiro dia — e alarme que toca sempre deixa de ser lido
+    # justamente quando passa a valer. Só vira alerta quando há mensagem de
+    # paciente parada esperando atendimento.
+    if entrada.get("consumidores", 0) == 0 and esperando:
         alertas.append(
-            "Nenhum worker conectado: mensagem que chegar agora fica esperando. "
-            "Confira o recurso com PAPEL=worker no Coolify."
+            f"{esperando} mensagem(ns) esperando e nenhum worker conectado — "
+            "ninguém está respondendo. Confira o recurso com PAPEL=worker no Coolify."
         )
     elif entrada.get("mensagens", 0) > 20:
         alertas.append(
