@@ -18,6 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py ./
 COPY index.html ./
+COPY entrada.sh ./
+RUN chmod +x entrada.sh
 
 # Sem root: o processo não escreve em disco (estado vive no Postgres), não há
 # motivo pra ter permissão.
@@ -30,7 +32,13 @@ EXPOSE 8099
 # /saude é a única rota sem auth, justamente pra isto funcionar. Devolve 503
 # se o Postgres não responder, então container de pé com banco fora não passa
 # por saudável.
+#
+# Só vale pro painel: o worker não escuta HTTP. Em PAPEL=worker o healthcheck
+# daria falha eterna e o Coolify reiniciaria o container em loop — por isso ele
+# se declara saudável quando não é o painel, e quem vigia o worker é a fila
+# (mensagem parada em agente.entrada é o sintoma de worker morto).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python3 -c "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('PORT','8099')}/saude\", timeout=4).status==200 else 1)"
+    CMD python3 -c "import os,sys,urllib.request; sys.exit(0) if os.environ.get('PAPEL','painel')!='painel' else sys.exit(0 if urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('PORT','8099')}/saude\", timeout=4).status==200 else 1)"
 
-CMD ["python3", "servidor.py"]
+# PAPEL=painel (padrão) ou PAPEL=worker — ver entrada.sh
+CMD ["./entrada.sh"]

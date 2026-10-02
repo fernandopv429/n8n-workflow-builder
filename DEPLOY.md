@@ -48,6 +48,32 @@ projeto nenhum. Cria e apaga projetos, chaves e membros de toda a conta OpenAI
 do Grupo A5. Quem tiver acesso às variáveis do Coolify tem isso — mesmo nível
 de cuidado da senha do painel.
 
+## 3.1 O worker do agente é um SEGUNDO recurso
+
+O painel e o worker são processos diferentes e sobem separados — mesma imagem,
+mesmo repositório, só muda a variável `PAPEL`:
+
+| | painel | worker |
+|---|---|---|
+| `PAPEL` | `painel` (ou vazio) | `worker` |
+| o que faz | criar/gerenciar agentes | atender paciente, consumindo a fila |
+| porta | `8099` | nenhuma (não escuta HTTP) |
+| domínio | sim | **não** |
+| healthcheck | `/saude` | dispensado (ver Dockerfile) |
+
+No Coolify: **New Resource → Application → Dockerfile**, mesmo repositório,
+`PAPEL=worker`, sem domínio e sem porta publicada. As variáveis de banco,
+OpenAI e `RABBITMQ_AGENTE_URL` são as mesmas do painel.
+
+**Enquanto não existir esse segundo recurso, o worker simplesmente não roda** —
+o `agente.entrada` enche e ninguém consome. Até o passo 3 da migração (trilho
+genérico no n8n) ninguém publica nessa fila, então isso é inofensivo agora; vira
+problema no dia que o primeiro cliente for apontado.
+
+Para dois ou mais workers em paralelo, resolver antes a ordem por contato
+(ARQUITETURA-AGENTE.md): com mais de um consumidor, duas mensagens seguidas do
+mesmo número podem ser respondidas fora de ordem.
+
 ## 4. Healthcheck
 
 `GET /saude` — única rota sem autenticação, justamente pro healthcheck do
