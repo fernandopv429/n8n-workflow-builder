@@ -103,7 +103,128 @@ def garantir_schema():
                 atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+
+        # --- estado do agente de atendimento (ARQUITETURA-AGENTE.md) -------
+        # Substitui a tabela `clientes_<nome>` do Supabase, que era UMA POR
+        # CLIENTE — o mesmo vício do clone, com DDL a cada cliente novo. Aqui é
+        # uma tabela só, com cliente_id. Colunas espelham as que os workflows
+        # realmente usam: id_whatsapp, nome, status ('HUMANO' no handoff),
+        # ultima_mensagem e repondeu_follow.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS contatos (
+                id SERIAL PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                id_whatsapp TEXT NOT NULL,
+                nome TEXT,
+                status TEXT NOT NULL DEFAULT 'IA'
+                    CHECK (status IN ('IA', 'HUMANO')),
+                respondeu_follow BOOLEAN NOT NULL DEFAULT FALSE,
+                ultima_mensagem TIMESTAMPTZ,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (cliente_id, id_whatsapp)
+            )
+        """)
+        # Memória da conversa, por contato. Separada de chat_mensagens, que é o
+        # chat do PAINEL (operador conversando sobre o cliente) — misturar os
+        # dois faria o agente responder ao paciente com contexto de manutenção.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agente_mensagens (
+                id SERIAL PRIMARY KEY,
+                contato_id INTEGER NOT NULL REFERENCES contatos(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                conteudo TEXT NOT NULL,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agente_mensagens_contato "
+            "ON agente_mensagens (contato_id, criado_em)"
+        )
+        # Idempotência: o WhatsApp reentrega, e a fila reentrega no retry. Sem
+        # esta trava o paciente recebe a mesma resposta duas vezes. O UNIQUE é a
+        # garantia real — checar antes de processar é corrida, não trava.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mensagens_processadas (
+                mensagem_id TEXT PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                processada_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
     _seed_templates_nicho()
+
+
+# --- estado do agente de atendimento ------------------------------------
+
+def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") -> dict:
+    """Devolve o contato, criando se for a primeira mensagem dele.
+
+    `ON CONFLICT DO UPDATE` em vez de SELECT-depois-INSERT: duas mensagens
+    simultâneas do mesmo número criariam duas linhas na versão ingênua.
+    """
+    with _conectar() as conn:
+        linha = conn.execute(
+            """
+            INSERT INTO contatos (cliente_id, id_whatsapp, nome, ultima_mensagem)
+            VALUES (%s, %s, NULLIF(%s, ''), now())
+            ON CONFLICT (cliente_id, id_whatsapp) DO UPDATE
+                SET ultima_mensagem = now(),
+                    nome = COALESCE(contatos.nome, EXCLUDED.nome)
+            RETURNING id, cliente_id, id_whatsapp, nome, status, respondeu_follow
+            """,
+            (cliente_id, id_whatsapp, nome or ""),
+        ).fetchone()
+    campos = ("id", "cliente_id", "id_whatsapp", "nome", "status", "respondeu_follow")
+    return dict(zip(campos, linha))
+
+
+def definir_status_contato(contato_id: int, status: str):
+    """'HUMANO' tira o contato do atendimento automático — é o handoff. O worker
+    confere isso ANTES de responder, senão a IA fala por cima do atendente."""
+    if status not in ("IA", "HUMANO"):
+        raise ValueError(f"status inválido: {status}")
+    with _conectar() as conn:
+        conn.execute("UPDATE contatos SET status = %s WHERE id = %s", (status, contato_id))
+
+
+def salvar_mensagem_agente(contato_id: int, role: str, conteudo: str):
+    with _conectar() as conn:
+        conn.execute(
+            "INSERT INTO agente_mensagens (contato_id, role, conteudo) VALUES (%s, %s, %s)",
+            (contato_id, role, conteudo),
+        )
+
+
+def listar_mensagens_agente(contato_id: int, limite: int = 20) -> list:
+    """Últimas N em ordem cronológica. O limite existe pelo mesmo motivo do
+    MAX_TURNOS_HISTORICO no painel: histórico longo degrada a resposta além de
+    custar caro."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT role, conteudo FROM (
+                SELECT role, conteudo, criado_em FROM agente_mensagens
+                WHERE contato_id = %s ORDER BY criado_em DESC LIMIT %s
+            ) ultimas ORDER BY criado_em
+            """,
+            (contato_id, limite),
+        ).fetchall()
+    return [{"role": r[0], "conteudo": r[1]} for r in linhas]
+
+
+def registrar_mensagem_processada(mensagem_id: str, cliente_id: int) -> bool:
+    """True se é nova, False se já foi processada antes.
+
+    Quem garante é o PRIMARY KEY, não um SELECT anterior: entre o SELECT e o
+    INSERT cabe outra entrega da mesma mensagem, e o paciente receberia a
+    resposta duas vezes.
+    """
+    with _conectar() as conn:
+        linha = conn.execute(
+            "INSERT INTO mensagens_processadas (mensagem_id, cliente_id) VALUES (%s, %s) "
+            "ON CONFLICT (mensagem_id) DO NOTHING RETURNING mensagem_id",
+            (mensagem_id, cliente_id),
+        ).fetchone()
+    return linha is not None
 
 
 # --- templates por nicho -----------------------------------------------
