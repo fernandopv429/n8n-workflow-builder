@@ -534,6 +534,68 @@ def teste_reconhece_corpo_de_erro_do_kommo():
     assert mk.erro_do_kommo(sucesso) is None, "sucesso não pode ser lido como erro"
 
 
+# --- projeto/chave da OpenAI por cliente (openai_admin.py) -------------------
+# Um projeto por cliente é o que torna o custo rastreável: até 29/09/2026 toda
+# a organização usava um projeto só, e não havia como saber quanto cada cliente
+# consumia. Estes testes dublam a Admin API — nunca tocam na conta real.
+
+def _com_admin_dublado(respostas):
+    """respostas: {(metodo, caminho): corpo}. Devolve (modulo, original)."""
+    import openai_admin
+    original = openai_admin._chamar
+    def falso(metodo, caminho, corpo=None):
+        # do padrão mais específico pro mais genérico: "/projects" também casa
+        # com "/projects/X/service_accounts", e aí o dublê responderia errado
+        for (m, c), resposta in sorted(respostas.items(), key=lambda kv: -len(kv[0][1])):
+            if m == metodo and c in caminho:
+                return resposta(corpo) if callable(resposta) else resposta
+        raise AssertionError(f"chamada inesperada: {metodo} {caminho}")
+    openai_admin._chamar = falso
+    return openai_admin, original
+
+
+def teste_cria_projeto_e_chave_do_cliente():
+    oa, orig = _com_admin_dublado({
+        ("POST", "/projects"): lambda corpo: {"id": "proj_X", "name": corpo["name"]},
+        ("POST", "/projects/proj_X/service_accounts"): {"api_key": {"value": "sk-proj-abc", "id": "key_1"}},
+    })
+    try:
+        r = oa.criar_projeto_e_chave("Dra. Fabiana")
+    finally:
+        oa._chamar = orig
+    assert r["projeto_id"] == "proj_X", r
+    assert r["api_key"] == "sk-proj-abc", r
+    # prefixo deixa distinguir projeto de cliente de projeto interno no painel
+    assert r["projeto_nome"] == "A5 Dra. Fabiana", r
+
+
+def teste_nao_deixa_projeto_orfao_se_a_chave_nao_vier():
+    """Projeto criado sem chave não serve pra nada e ficaria pendurado no painel
+    da OpenAI — tem que ser arquivado antes de propagar o erro."""
+    arquivados = []
+    oa, orig = _com_admin_dublado({
+        ("POST", "/projects"): {"id": "proj_Y", "name": "A5 X"},
+        ("POST", "/projects/proj_Y/service_accounts"): {},   # sem api_key
+        ("POST", "/projects/proj_Y/archive"): lambda _c: arquivados.append("proj_Y") or {},
+    })
+    try:
+        try:
+            oa.criar_projeto_e_chave("X")
+            raise AssertionError("devia ter falhado")
+        except oa.OpenAiAdminError:
+            pass
+    finally:
+        oa._chamar = orig
+    assert arquivados == ["proj_Y"], f"projeto ficou órfão: {arquivados}"
+
+
+def teste_erro_da_openai_carrega_o_corpo():
+    """Mesma lição do Kommo: erro sem o corpo faz a gente chutar."""
+    import openai_admin
+    e = openai_admin.OpenAiAdminError(403, '{"error":{"message":"insufficient permissions"}}')
+    assert "403" in str(e) and "insufficient permissions" in str(e), str(e)
+
+
 TESTES = [
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
@@ -566,6 +628,9 @@ TESTES = [
     teste_criar_funil_barra_is_main_e_funil_sem_etapa,
     teste_criar_funil_barra_dica_na_criacao,
     teste_reconhece_corpo_de_erro_do_kommo,
+    teste_cria_projeto_e_chave_do_cliente,
+    teste_nao_deixa_projeto_orfao_se_a_chave_nao_vier,
+    teste_erro_da_openai_carrega_o_corpo,
 ]
 
 

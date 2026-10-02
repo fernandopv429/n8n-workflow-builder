@@ -54,6 +54,12 @@ def garantir_schema():
         # só o vínculo (mesmo padrão do cadastro-veiculos).
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS imagem_pb_record_id TEXT")
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS imagem_pb_filename TEXT")
+        # Projeto da OpenAI criado pra este cliente (openai_admin.py). Guardamos
+        # só o ID: é o que permite perguntar quanto ESTE cliente consumiu
+        # (/organization/costs?group_by=project_id) e arquivar o projeto quando
+        # ele sai, revogando as chaves de uma vez. A chave em si nunca entra
+        # aqui — vai direto pra credencial do n8n e a OpenAI não a mostra de novo.
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS openai_projeto_id TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -327,9 +333,18 @@ def obter_credencial_openai(cliente_id: int) -> str:
     return (r[0] or {}).get("openai_credential_id", "") or ""
 
 
+def definir_projeto_openai(cliente_id: int, projeto_id: str):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET openai_projeto_id = %s, atualizado_em = now() WHERE id = %s",
+            (projeto_id or None, cliente_id),
+        )
+
+
 def remover_cliente(cliente_id: int):
-    """Apaga o cliente e tudo que pende dele no banco. Não toca no n8n — quem
-    decide isso é quem chama (ver cloner.remover_agente)."""
+    """Apaga o cliente e tudo que pende dele no banco. Não toca no n8n nem na
+    OpenAI — quem decide isso é quem chama (ver cloner.remover_agente e
+    openai_admin.arquivar_projeto)."""
     with _conectar() as conn:
         conn.execute("DELETE FROM chat_lotes WHERE cliente_id = %s", (cliente_id,))
         conn.execute("DELETE FROM chat_mensagens WHERE cliente_id = %s", (cliente_id,))

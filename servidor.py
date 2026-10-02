@@ -47,6 +47,7 @@ import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import n8n_edicao  # noqa: E402
+import openai_admin  # noqa: E402
 import pocketbase_client  # noqa: E402
 import cloner  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
@@ -473,6 +474,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 relatorio.append(f"imagem ficou no PocketBase: {e}")
 
+        # Arquivar revoga as chaves do projeto. Sem isso a chave do cliente
+        # continuaria valendo e gastando depois de ele sair do painel — e
+        # ninguém lembra de limpar isso à mão no site da OpenAI.
+        if cliente.get("openai_projeto_id"):
+            try:
+                openai_admin.arquivar_projeto(cliente["openai_projeto_id"])
+                relatorio.append(
+                    f"projeto {cliente['openai_projeto_id']} arquivado na OpenAI (chaves revogadas)"
+                )
+            except Exception as e:  # noqa: BLE001 — não travar a remoção no painel
+                relatorio.append(
+                    f"ATENÇÃO: o projeto {cliente['openai_projeto_id']} continua ativo na "
+                    f"OpenAI e a chave dele ainda funciona — arquive à mão: {e}"
+                )
+
         db.remover_cliente(cliente_id)
         self._responder_json(200, {
             "removido": True,
@@ -543,13 +559,48 @@ class Handler(BaseHTTPRequestHandler):
                 "continua no n8n e deixa de ser o agente deste cliente no painel.",
             )
 
+        # Sem chave digitada, cria um projeto próprio do cliente na OpenAI e
+        # tira a chave de lá. Além de poupar o passo manual, é o que torna o
+        # custo rastreável: hoje tudo cai num projeto só e não dá pra saber
+        # quanto cada cliente consome. Em dry_run não cria nada.
+        chave_openai = corpo.get("openai_api_key", "").strip()
+        projeto_openai = ""
+        if not chave_openai and not openai_admin.disponivel():
+            self._responder_json(400, {"error":
+                "preencha a chave da OpenAI — a criação automática exige a variável "
+                "OPENAI_ADMIN_KEY configurada no servidor."})
+            return
+        if not chave_openai and dry_run:
+            # dry-run não cria nada em lugar nenhum, nem projeto na OpenAI; o
+            # manifesto só precisa de um valor pra passar na validação, e o
+            # cloner já reporta a credencial como "SERIA criada".
+            chave_openai = "(chave seria criada na OpenAI)"
+        elif not chave_openai and openai_admin.disponivel():
+            try:
+                criado = openai_admin.criar_projeto_e_chave(cliente["cliente_nome"])
+            except openai_admin.OpenAiAdminError as e:
+                db.registrar_log(cliente_id, "erro", f"OpenAI Admin API: {e}")
+                self._responder_json(502, {"error": f"não consegui criar a chave da OpenAI: {e}"})
+                return
+            chave_openai = criado["api_key"]
+            projeto_openai = criado["projeto_id"]
+            # grava ANTES de clonar: se a clonagem falhar depois disso, o
+            # projeto já está vinculado ao cliente e some junto quando ele for
+            # excluído — senão ficaria órfão na OpenAI, com chave válida.
+            db.definir_projeto_openai(cliente_id, projeto_openai)
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Projeto '{criado['projeto_nome']}' criado na OpenAI ({projeto_openai}) "
+                "com chave própria — o consumo deste cliente passa a ser medido separado.",
+            )
+
         dados_manifesto = {
             "cliente_nome": cliente["cliente_nome"],
             "nicho": cliente["nicho"],
             "workflow_origem_id": cliente["workflow_origem_id"],
             "kommo_subdominio": corpo.get("kommo_subdominio", ""),
             "kommo_token": corpo.get("kommo_token", ""),
-            "openai_api_key": corpo.get("openai_api_key", ""),
+            "openai_api_key": chave_openai,
         }
         try:
             manifesto = ClienteManifest.de_dict(dados_manifesto)

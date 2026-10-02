@@ -117,6 +117,7 @@
   .card h3 { margin: 0 0 8px; font-size: 14px; }
   ul.avisos { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
   small.hint { color: var(--muted); display: block; margin-top: 4px; }
+  .opcional { color: var(--muted); font-weight: 400; }
 
   /* tela de gerenciamento: logs + engrenagem + chat */
   .gerenciamento-topo { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; flex: 0 0 auto; }
@@ -274,9 +275,11 @@
 
       <fieldset>
         <legend>OpenAI</legend>
-        <label for="openai_api_key">Chave da API</label>
-        <input type="password" id="openai_api_key" required placeholder="sk-...">
-        <small class="hint">A credencial é criada no n8n na hora, com o nome "{cliente} Key OpenIA" — não precisa existir antes.</small>
+        <label for="openai_api_key">Chave da API <span class="opcional">(opcional)</span></label>
+        <input type="password" id="openai_api_key" placeholder="deixe vazio para criar automaticamente">
+        <small class="hint">Deixando vazio, o cliente ganha um projeto próprio na OpenAI com chave
+          exclusiva — assim dá pra ver quanto cada um consome e cortar o acesso dele sozinho.
+          Preencha só se quiser reaproveitar uma chave que já existe.</small>
       </fieldset>
 
       <div class="linha" id="linha-forcar-novo" style="display:none">
