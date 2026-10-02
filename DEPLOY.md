@@ -26,15 +26,27 @@ e em `~/Área de trabalho/Conexão_geral/CREDENCIAIS.md`.
 | `N8N_API_KEY` | API pública do n8n (`aud: public-api`) | **sim** |
 | `DATABASE_URL` | Postgres do estado (clientes/chat/logs) | **sim** |
 | `OPENAI_API_KEY` | chat do painel e geração a partir do briefing | **sim** |
+| `OPENAI_ADMIN_KEY` | cria projeto + chave por cliente (`sk-admin-...`) | não |
 | `AGENTOPS_API_KEY` | rastreio das chamadas de IA | não |
 | `POCKETBASE_URL` | `https://db.a5ecossistema.tech` | só p/ imagem |
 | `POCKETBASE_ADMIN_EMAIL` | superusuário do PocketBase | só p/ imagem |
 | `POCKETBASE_ADMIN_PASSWORD` | senha desse superusuário | só p/ imagem |
+| `SOURCE_COMMIT` | commit mostrado em `/saude` (o Coolify costuma injetar) | não |
 | `PORT` | o Coolify costuma injetar; padrão `8099` | não |
 
 **Sem `PAINEL_SENHA` o painel responde 401 em tudo.** É de propósito — falha
 fechada, porque este sistema edita workflow n8n e CRM de cliente real e gasta
 crédito da OpenAI. Melhor ficar inacessível do que aberto.
+
+**`OPENAI_ADMIN_KEY` é opcional, mas sem ela o campo "Chave da API" volta a ser
+obrigatório no formulário** — e aí todos os clientes acabam compartilhando a
+mesma chave, que é o que impedia medir consumo por cliente. Com ela, deixar o
+campo vazio cria um projeto `A5 {cliente}` com chave exclusiva.
+
+Atenção ao poder dessa chave: ela é de **organização**, não é escopada a
+projeto nenhum. Cria e apaga projetos, chaves e membros de toda a conta OpenAI
+do Grupo A5. Quem tiver acesso às variáveis do Coolify tem isso — mesmo nível
+de cuidado da senha do painel.
 
 ## 4. Healthcheck
 
