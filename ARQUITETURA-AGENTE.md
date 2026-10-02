@@ -1,7 +1,13 @@
 # Agente em Python, n8n como trilho e ferramentas
 
-Proposta discutida em 02/10/2026. **Ainda não implementada** — este documento é
-o desenho acordado, pra revisar antes de escrever código.
+Desenho **aprovado pelo Fernando em 02/10/2026**. Implementação em andamento;
+cada etapa está no fim do documento.
+
+Uma decisão que vale explicitar porque muda o risco: **o painel continua sendo
+só o painel** — criar e gerenciar agentes, como já faz. Ele não recebe tráfego
+de paciente. Quem atende é um **worker separado**, que consome a fila. Por isso
+o `http.server` de processo único do painel deixa de ser um problema: ele nunca
+fica no caminho de uma conversa.
 
 ## Por que mexer
 
@@ -127,7 +133,13 @@ mensagem se perde em silêncio**. Com fila ela espera.
 
 ## Ordem de migração
 
-1. Vhost próprio no RabbitMQ + filas, sem ninguém publicando.
+1. ~~Vhost próprio no RabbitMQ + filas, sem ninguém publicando.~~ **Feito em
+   02/10/2026** (`infra_filas.py`). Vhost `agente`, usuário `agente` escopado só
+   a ele, filas `agente.entrada` (com dead-letter), `agente.saida` e
+   `agente.entrada.dlq`. Verificado: publica e consome; `nack` sem requeue cai
+   no dead-letter em vez de sumir; e a credencial do worker recebe
+   `ChannelClosedByBroker` ao tentar ler `scraping_queue` do CJPG — o
+   isolamento entre projetos é real, nos dois sentidos.
 2. Worker em Python consumindo `agente.entrada`, respondendo em `agente.saida`,
    com o agente e as travas — testado contra mensagens injetadas à mão.
 3. Trilho genérico no n8n, apontado para **um cliente de teste**.
