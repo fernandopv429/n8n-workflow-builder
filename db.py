@@ -177,6 +177,21 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
     return dict(zip(campos, linha))
 
 
+def definir_prompt(cliente_id: int, texto: str):
+    """Grava o prompt do agente escrito à mão.
+
+    Até 02/10/2026 esse campo só era preenchido pelo retorno da Batch API, a
+    partir do briefing — não havia como escrever nem corrigir uma vírgula sem
+    gerar tudo de novo. Com o agente rodando no nosso worker, este texto É o
+    system prompt dele (ver worker_agente.py), então precisa ser editável.
+    """
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET prompt_sugerido = %s, atualizado_em = now() WHERE id = %s",
+            (texto, cliente_id),
+        )
+
+
 def listar_contatos(cliente_id: int, limite: int = 100) -> list:
     """Quem está conversando com o agente deste cliente, mais recente primeiro.
 

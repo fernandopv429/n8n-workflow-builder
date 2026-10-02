@@ -392,22 +392,40 @@ async function carregarBriefing() {
     return;
   }
 
-  if (!cliente.batch_id) {
-    caixa.style.display = 'none';
-    return;
-  }
+  // A caixa aparece SEMPRE, não só depois de um briefing: o prompt é o que o
+  // agente usa pra falar com o paciente (worker_agente.py), e até 02/10/2026 só
+  // existia como subproduto da Batch API — quem nunca rodou briefing não tinha
+  // onde escrever, e quem rodou não tinha como corrigir uma vírgula.
   caixa.style.display = 'block';
+  const estrutura = cliente.estrutura_kommo_sugerida
+    ? JSON.stringify(cliente.estrutura_kommo_sugerida, null, 2) : '';
+  const podeAplicar = cliente.prompt_sugerido && cliente.workflow_novo_id;
+  const emAndamento = cliente.batch_id && cliente.batch_status !== 'completed';
 
-  if (cliente.batch_status === 'completed') {
-    const estrutura = cliente.estrutura_kommo_sugerida
-      ? JSON.stringify(cliente.estrutura_kommo_sugerida, null, 2)
-      : '(não gerado)';
-    const podeAplicar = cliente.prompt_sugerido && cliente.workflow_novo_id;
+  {
     caixa.innerHTML = `
-      <div class="briefing-titulo">Gerado a partir do briefing</div>
-      <details><summary>Prompt do agente</summary><div class="briefing-conteudo">${escaparHtml(cliente.prompt_sugerido || '(não gerado)')}</div></details>
-      <details><summary>Estrutura de Kommo sugerida (ainda NÃO aplicada — peça no chat)</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>
-      ${podeAplicar ? '<button type="button" class="principal" id="botao-aplicar-prompt" style="margin-top:12px">Aplicar este prompt no agente</button>' : ''}`;
+      <label for="campo-prompt">Prompt do agente — é com ele que o agente fala com o paciente</label>
+      <textarea id="campo-prompt" rows="10" placeholder="Escreva aqui, ou cole um briefing no chat abaixo para gerar automaticamente.">${escaparHtml(cliente.prompt_sugerido || '')}</textarea>
+      <button type="button" class="handoff-botao" id="botao-salvar-prompt">Salvar prompt</button>
+      <span id="prompt-aviso" class="opcional">${emAndamento ? 'gerando a partir do briefing — o texto vai aparecer aqui quando ficar pronto' : ''}</span>
+      ${estrutura ? `<details><summary>Estrutura de Kommo sugerida pelo briefing (ainda NÃO aplicada — peça no chat)</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>` : ''}
+      ${podeAplicar ? '<button type="button" class="principal" id="botao-aplicar-prompt" style="margin-top:12px">Aplicar também no workflow do n8n (clientes ainda não migrados)</button>' : ''}`;
+
+    document.getElementById('botao-salvar-prompt').addEventListener('click', async (ev) => {
+      const b = ev.target;
+      const aviso = document.getElementById('prompt-aviso');
+      b.disabled = true;
+      const resp = await fetch(`/clientes/${clienteAtualId}/prompt`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: document.getElementById('campo-prompt').value }),
+      });
+      const corpo = await resp.json();
+      aviso.textContent = resp.ok
+        ? `salvo (${corpo.caracteres} caracteres) — vale da próxima mensagem em diante`
+        : `erro: ${corpo.error}`;
+      b.disabled = false;
+      carregarLogs();
+    });
 
     if (podeAplicar) {
       document.getElementById('botao-aplicar-prompt').addEventListener('click', async (ev) => {
@@ -425,10 +443,13 @@ async function carregarBriefing() {
         }
       });
     }
-  } else if (['failed', 'expired', 'cancelled'].includes(cliente.batch_status)) {
-    caixa.innerHTML = `<div class="briefing-titulo">Batch API não concluiu (status: ${cliente.batch_status})</div>`;
-  } else {
-    caixa.innerHTML = `<div class="briefing-titulo">Gerando prompt e sugestão de Kommo via Batch API (status: ${cliente.batch_status || 'enviado'}) — pode levar de minutos a horas. Recarregue a página pra checar.</div>`;
+  }
+
+  // Briefing que não concluiu não pode apagar o campo de prompt da tela — ele é
+  // o jeito de o operador escrever à mão justamente quando a geração falhou.
+  if (['failed', 'expired', 'cancelled'].includes(cliente.batch_status)) {
+    document.getElementById('prompt-aviso').textContent =
+      `a geração pelo briefing não concluiu (${cliente.batch_status}) — escreva o prompt aqui`;
   }
 }
 

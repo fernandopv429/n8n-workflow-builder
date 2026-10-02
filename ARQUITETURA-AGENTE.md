@@ -124,6 +124,17 @@ mensagem se perde em silêncio**. Com fila ela espera.
   escrevendo lá até serem migrados, um cliente por vez. O Supabase só pode ser
   desligado depois do último cliente migrado — e aí vira uma decisão separada,
   não um efeito colateral desta mudança.
+- **Credenciais do Kommo ainda moram no n8n.** `worker_agente.py` lê o
+  subdomínio e o token pelo node `Database` do workflow clonado
+  (`n8n_edicao.ler_credenciais_kommo`). Isso foi uma decisão deliberada da fase
+  anterior — não guardar token de cliente no nosso banco —, mas ela depende de
+  o clone existir. **No desenho final não há clone**, então o worker ficaria
+  sem credencial. Antes do passo 3: decidir onde o token passa a morar. Guardar
+  no nosso Postgres é o caminho óbvio, e aí ele precisa ser cifrado em repouso,
+  não em texto puro como está hoje dentro do workflow.
+- **Dois clientes com o mesmo nome.** Hoje existem dois "Teste" no banco, um
+  sem workflow. Isso confundiu um teste meu em 02/10/2026 e vai confundir quem
+  usa a tela. Falta unicidade de nome, ou mostrar o id no card.
 - **Servidor HTTP.** O painel é `http.server`, processo único, sem concorrência
   real. Serve pra ferramenta interna; **não** serve pra conversa de paciente.
   O worker da fila é um processo separado, mas o painel precisa de servidor de

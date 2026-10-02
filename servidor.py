@@ -83,6 +83,7 @@ ROTA_CONTATO_MENSAGENS = re.compile(r"^/contatos/(\d+)/mensagens$")
 ROTA_CONTATO_STATUS = re.compile(r"^/contatos/(\d+)/status$")
 ROTA_FILA = re.compile(r"^/fila$")
 ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
+ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
 
 
 def _com_imagem(cliente: dict) -> dict:
@@ -540,6 +541,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_PROMPT.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            texto = (self._ler_corpo().get("prompt") or "").strip()
+            db.definir_prompt(cliente_id, texto)
+            # Fica no log porque muda como o agente fala com o paciente a partir
+            # da próxima mensagem — e, diferente de um clone, vale na hora.
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Prompt do agente alterado à mão ({len(texto)} caracteres). "
+                "Vale a partir da próxima mensagem recebida.",
+            )
+            self._responder_json(200, {"salvo": True, "caracteres": len(texto)})
             return
 
         m = ROTA_CONTATO_STATUS.match(self.path)
