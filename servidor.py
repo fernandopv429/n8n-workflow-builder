@@ -619,6 +619,9 @@ class Handler(BaseHTTPRequestHandler):
                     "kommo_invalido": True,
                 })
                 return
+            # Guarda só DEPOIS de o Kommo confirmar: credencial inválida no
+            # banco é pior que ausente — o worker a usaria achando que vale.
+            db.definir_credenciais_kommo(cliente_id, subdominio, token)
             funis = checagem.get("funis")
             db.registrar_log(
                 cliente_id, "sistema",

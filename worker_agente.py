@@ -119,7 +119,7 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
     mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in historico]
 
-    credenciais = n8n_edicao.ler_credenciais_kommo(cliente["workflow_novo_id"])
+    credenciais = n8n_edicao.credenciais_kommo(cliente)
     ferramentas = _ferramentas_kommo()
     openai = _cliente_openai(cliente)
 
@@ -169,17 +169,30 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int) -> str:
 
 def processar(payload: dict) -> dict:
     """Devolve o que publicar em `agente.saida`, ou None se não há o que responder."""
-    cliente_id = int(payload["cliente_id"])
+    # O trilho do n8n é UM só pra todos os clientes, então ele não sabe de quem
+    # é a mensagem — manda a `instancia` do Evolution e nós resolvemos aqui.
+    # `cliente_id` direto continua aceito, pra teste e pra quem publicar na mão.
+    instancia = str(payload.get("instancia") or "").strip()
+    if instancia:
+        cliente = db.obter_cliente_por_instancia(instancia)
+        if not cliente:
+            raise ValueError(
+                f"instância '{instancia}' não está vinculada a nenhum cliente — "
+                "cadastre na engrenagem do painel"
+            )
+        cliente_id = cliente["id"]
+    else:
+        cliente_id = int(payload["cliente_id"])
+        cliente = db.obter_cliente(cliente_id)
+        if cliente is None:
+            raise ValueError(f"cliente {cliente_id} não existe")
+
     id_whatsapp = str(payload["id_whatsapp"])
     mensagem_id = str(payload.get("mensagem_id") or "")
     texto = (payload.get("texto") or "").strip()
 
     if mensagem_id and not db.registrar_mensagem_processada(mensagem_id, cliente_id):
         return None  # reentrega do WhatsApp ou da fila — já respondemos esta
-
-    cliente = db.obter_cliente(cliente_id)
-    if cliente is None or not cliente.get("workflow_novo_id"):
-        raise ValueError(f"cliente {cliente_id} sem agente configurado")
 
     contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
     if contato["status"] == "HUMANO":
@@ -192,6 +205,9 @@ def processar(payload: dict) -> dict:
     db.salvar_mensagem_agente(contato["id"], "assistant", resposta)
     return {
         "cliente_id": cliente_id,
+        # a instância volta no payload porque é ela que o node do Evolution usa
+        # pra saber por qual número enviar — o trilho de saída não consulta banco
+        "instancia": cliente.get("evolution_instancia") or instancia,
         "id_whatsapp": id_whatsapp,
         "texto": resposta,
         "mensagem_id": mensagem_id,

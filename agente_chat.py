@@ -619,7 +619,7 @@ def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: in
                 n8n_edicao.renomear_node(workflow_id, args["nome_atual"], args["nome_novo"]), ensure_ascii=False
             )
         if nome.startswith("kommo_"):
-            credenciais = n8n_edicao.ler_credenciais_kommo(workflow_id)
+            credenciais = n8n_edicao.credenciais_kommo(db.obter_cliente(cliente_id))
             args = _normalizar_args_kommo(args)
             if nome == "kommo_criar_funil":
                 args, erro = _guarda_criar_funil(args)

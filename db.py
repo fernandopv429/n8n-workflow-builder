@@ -65,6 +65,22 @@ def garantir_schema():
         # resolver. A OpenAI só mostra a chave uma vez, na criação, então ou
         # guardamos aqui ou ela se perde.
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS openai_api_key_cifrada TEXT")
+        # Credenciais do Kommo. Até 02/10/2026 moravam SÓ no node `Database` do
+        # workflow clonado — o que amarrava o atendimento à existência do clone,
+        # e o desenho novo não tem clone (ARQUITETURA-AGENTE.md). O subdomínio é
+        # público (aparece na URL da conta); o token é cifrado.
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS kommo_subdominio TEXT")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS kommo_token_cifrado TEXT")
+        # Instância do Evolution (WhatsApp) deste cliente. É a chave que o
+        # trilho genérico do n8n manda na fila pra dizer DE QUEM é a mensagem —
+        # sem ela não existe um workflow só pra todos, volta a ser um por
+        # cliente. UNIQUE porque duas contas na mesma instância misturariam
+        # conversa de pacientes de clientes diferentes.
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS evolution_instancia TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_instancia "
+            "ON clientes (evolution_instancia) WHERE evolution_instancia IS NOT NULL"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -526,6 +542,61 @@ def definir_projeto_openai(cliente_id: int, projeto_id: str, api_key_cifrada: st
             "atualizado_em = now() WHERE id = %s",
             (projeto_id or None, api_key_cifrada, cliente_id),
         )
+
+
+def obter_cliente_por_instancia(instancia: str) -> dict:
+    """De qual cliente é esta instância do Evolution. Devolve {} se nenhuma."""
+    if not instancia:
+        return {}
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT * FROM clientes WHERE evolution_instancia = %s", (instancia,)
+        )
+        linha = cur.fetchone()
+        if not linha:
+            return {}
+        return dict(zip([d[0] for d in cur.description], linha))
+
+
+def definir_instancia_evolution(cliente_id: int, instancia: str):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET evolution_instancia = NULLIF(%s, ''), atualizado_em = now() "
+            "WHERE id = %s",
+            (instancia.strip(), cliente_id),
+        )
+
+
+def definir_credenciais_kommo(cliente_id: int, subdominio: str, token: str):
+    """Guarda subdomínio em claro e token cifrado. Token vazio não apaga o que
+    já existe — a tela de credenciais reenvia o formulário inteiro, e um campo
+    deixado em branco significa "não mexi nisso", não "apague"."""
+    import cofre
+    cifrado = cofre.cifrar(token) if (token and cofre.disponivel()) else ""
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET kommo_subdominio = COALESCE(NULLIF(%s, ''), kommo_subdominio), "
+            "kommo_token_cifrado = COALESCE(NULLIF(%s, ''), kommo_token_cifrado), "
+            "atualizado_em = now() WHERE id = %s",
+            (subdominio, cifrado, cliente_id),
+        )
+
+
+def obter_credenciais_kommo(cliente_id: int) -> dict:
+    """{kommo_domain, access_token} do nosso banco, ou {} se não tiver.
+
+    Quem chama cai pro node Database do clone quando vier vazio — é o que
+    mantém os clientes antigos funcionando durante a migração.
+    """
+    import cofre
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT kommo_subdominio, kommo_token_cifrado FROM clientes WHERE id = %s",
+            (cliente_id,),
+        ).fetchone()
+    if not linha or not linha[0] or not linha[1]:
+        return {}
+    return {"kommo_domain": f"{linha[0]}.kommo.com", "access_token": cofre.decifrar(linha[1])}
 
 
 def obter_chave_openai_cliente(cliente_id: int) -> str:

@@ -293,8 +293,44 @@ def atualizar_connections(workflow_id: str, connections: dict) -> dict:
 
 
 def ler_credenciais_kommo(workflow_id: str) -> dict:
-    """Pro chat autorizar chamadas ao MCP do Kommo — nunca guardamos o token
-    do Kommo no nosso banco, ele mora só no node Database do workflow."""
+    """Lê o Kommo do node `Database` do workflow clonado.
+
+    Caminho LEGADO: só serve pra cliente que ainda tem clone. O desenho novo não
+    tem clone, então prefira `credenciais_kommo(cliente)`, que consulta o nosso
+    banco primeiro e só cai aqui se o cliente ainda não migrou.
+    """
     subdominio = ler_campo_database(workflow_id, "base-url")
     token = ler_campo_database(workflow_id, "kommo-token")
     return {"kommo_domain": f"{subdominio}.kommo.com", "access_token": token}
+
+
+def credenciais_kommo(cliente: dict) -> dict:
+    """Credenciais do Kommo deste cliente, do nosso banco ou do clone.
+
+    A ordem importa: o banco é a fonte do desenho novo, e o node `Database` é
+    o que mantém funcionando quem ainda não migrou. Quando o clone responde e
+    o banco está vazio, aproveita e GRAVA — assim a migração acontece sozinha,
+    na primeira mensagem de cada cliente, sem script de migração e sem janela.
+    """
+    import db
+
+    guardadas = db.obter_credenciais_kommo(cliente["id"])
+    if guardadas:
+        return guardadas
+
+    if not cliente.get("workflow_novo_id"):
+        raise EdicaoInvalida(
+            f"cliente '{cliente['cliente_nome']}' não tem credencial do Kommo no banco "
+            "nem workflow no n8n de onde lê-la — cadastre na engrenagem do painel."
+        )
+
+    do_clone = ler_credenciais_kommo(cliente["workflow_novo_id"])
+    subdominio = do_clone["kommo_domain"].replace(".kommo.com", "")
+    if subdominio and do_clone.get("access_token"):
+        db.definir_credenciais_kommo(cliente["id"], subdominio, do_clone["access_token"])
+        db.registrar_log(
+            cliente["id"], "sistema",
+            "Credenciais do Kommo copiadas do workflow pro banco (cifradas). "
+            "O atendimento deste cliente deixa de depender do clone existir.",
+        )
+    return do_clone
