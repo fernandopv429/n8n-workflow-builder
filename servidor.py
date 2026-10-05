@@ -51,6 +51,7 @@ import n8n_edicao  # noqa: E402
 import openai_admin  # noqa: E402
 import pocketbase_client  # noqa: E402
 import cloner  # noqa: E402
+import cofre  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
 from manifest import ClienteManifest  # noqa: E402
@@ -669,7 +670,15 @@ class Handler(BaseHTTPRequestHandler):
             # grava ANTES de clonar: se a clonagem falhar depois disso, o
             # projeto já está vinculado ao cliente e some junto quando ele for
             # excluído — senão ficaria órfão na OpenAI, com chave válida.
-            db.definir_projeto_openai(cliente_id, projeto_openai)
+            db.definir_projeto_openai(
+                cliente_id, projeto_openai,
+                cofre.cifrar(chave_openai) if cofre.disponivel() else "")
+            if not cofre.disponivel():
+                db.registrar_log(
+                    cliente_id, "erro",
+                    "COFRE_CHAVE não configurada: a chave da OpenAI deste cliente NÃO "
+                    "foi guardada, então o worker vai usar a chave global e o consumo "
+                    "dele não aparecerá separado.")
             db.registrar_log(
                 cliente_id, "sistema",
                 f"Projeto '{criado['projeto_nome']}' criado na OpenAI ({projeto_openai}) "

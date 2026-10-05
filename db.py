@@ -57,9 +57,14 @@ def garantir_schema():
         # Projeto da OpenAI criado pra este cliente (openai_admin.py). Guardamos
         # só o ID: é o que permite perguntar quanto ESTE cliente consumiu
         # (/organization/costs?group_by=project_id) e arquivar o projeto quando
-        # ele sai, revogando as chaves de uma vez. A chave em si nunca entra
-        # aqui — vai direto pra credencial do n8n e a OpenAI não a mostra de novo.
+        # ele sai, revogando as chaves de uma vez.
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS openai_projeto_id TEXT")
+        # Chave do projeto OpenAI DESTE cliente, cifrada (cofre.py). Sem ela o
+        # worker usaria a chave global pra todo mundo, e aí o consumo de todos
+        # cairia num projeto só — exatamente o que a separação por cliente veio
+        # resolver. A OpenAI só mostra a chave uma vez, na criação, então ou
+        # guardamos aqui ou ela se perde.
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS openai_api_key_cifrada TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -513,12 +518,30 @@ def obter_credencial_openai(cliente_id: int) -> str:
     return (r[0] or {}).get("openai_credential_id", "") or ""
 
 
-def definir_projeto_openai(cliente_id: int, projeto_id: str):
+def definir_projeto_openai(cliente_id: int, projeto_id: str, api_key_cifrada: str = ""):
     with _conectar() as conn:
         conn.execute(
-            "UPDATE clientes SET openai_projeto_id = %s, atualizado_em = now() WHERE id = %s",
-            (projeto_id or None, cliente_id),
+            "UPDATE clientes SET openai_projeto_id = %s, "
+            "openai_api_key_cifrada = COALESCE(NULLIF(%s, ''), openai_api_key_cifrada), "
+            "atualizado_em = now() WHERE id = %s",
+            (projeto_id or None, api_key_cifrada, cliente_id),
         )
+
+
+def obter_chave_openai_cliente(cliente_id: int) -> str:
+    """Chave do projeto deste cliente, já decifrada, ou "" se ele não tiver.
+
+    Quem chama decide o fallback: o worker cai na chave global pra não deixar
+    paciente sem resposta, mas registra que o gasto vai pro projeto errado.
+    """
+    import cofre
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT openai_api_key_cifrada FROM clientes WHERE id = %s", (cliente_id,)
+        ).fetchone()
+    if not linha or not linha[0]:
+        return ""
+    return cofre.decifrar(linha[0])
 
 
 def remover_cliente(cliente_id: int):

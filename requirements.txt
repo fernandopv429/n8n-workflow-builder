@@ -5,3 +5,4 @@ agentops==0.4.21
 psycopg[binary]==3.3.6
 mcp==2.2.0
 pika
+cryptography

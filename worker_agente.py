@@ -57,9 +57,32 @@ AVISO_INJECAO = (
 )
 
 
-def _cliente_openai():
+def _cliente_openai(cliente: dict):
+    """Usa a chave DO CLIENTE, não a global.
+
+    É isso que faz o consumo aparecer no projeto dele: a OpenAI atribui gasto
+    pela chave que fez a chamada. Com a chave global, todo o atendimento de
+    todos os clientes cairia num projeto só — e a aba Consumo mostraria quase
+    zero, já que a conversa com paciente é o maior gasto do sistema.
+
+    Fallback na chave global quando o cliente não tem a dele (cliente antigo,
+    ou criado antes do cofre): deixar paciente sem resposta é pior que medir
+    errado. Mas registra, senão o custo silenciosamente vira do projeto errado.
+    """
     from openai import OpenAI
-    return OpenAI(api_key=config.carregar_env()["OPENAI_API_KEY"])
+    chave = ""
+    try:
+        chave = db.obter_chave_openai_cliente(cliente["id"])
+    except Exception as e:  # noqa: BLE001 — cofre mal configurado não derruba atendimento
+        db.registrar_log(cliente["id"], "erro", f"[worker] não li a chave do cliente: {e}")
+    if not chave:
+        db.registrar_log(
+            cliente["id"], "sistema",
+            "[worker] sem chave própria da OpenAI — usando a global. O consumo "
+            "desta conversa NÃO vai aparecer no projeto deste cliente.",
+        )
+        chave = config.carregar_env()["OPENAI_API_KEY"]
+    return OpenAI(api_key=chave)
 
 
 def _ferramentas_kommo() -> list:
@@ -98,7 +121,7 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
 
     credenciais = n8n_edicao.ler_credenciais_kommo(cliente["workflow_novo_id"])
     ferramentas = _ferramentas_kommo()
-    openai = _cliente_openai()
+    openai = _cliente_openai(cliente)
 
     for _ in range(MAX_RODADAS):
         resposta = openai.chat.completions.create(

@@ -124,6 +124,15 @@ mensagem se perde em silêncio**. Com fila ela espera.
   escrevendo lá até serem migrados, um cliente por vez. O Supabase só pode ser
   desligado depois do último cliente migrado — e aí vira uma decisão separada,
   não um efeito colateral desta mudança.
+- ~~**A chave da OpenAI do cliente não era guardada.**~~ **Resolvido em
+  02/10/2026.** O worker usava a chave GLOBAL pra todos — então todo o
+  atendimento, que é o maior gasto do sistema, cairia num projeto só e a aba
+  Consumo mostraria quase zero por cliente, justamente o que a separação por
+  projeto veio resolver. A chave agora é guardada cifrada (`cofre.py`,
+  `COFRE_CHAVE`), porque a OpenAI só a mostra uma vez e a API do n8n não
+  devolve o valor de uma credencial (só id e nome). Sem `COFRE_CHAVE` o sistema
+  segue funcionando com a chave global, mas registra no log que o consumo
+  daquele cliente não vai aparecer separado.
 - **Credenciais do Kommo ainda moram no n8n.** `worker_agente.py` lê o
   subdomínio e o token pelo node `Database` do workflow clonado
   (`n8n_edicao.ler_credenciais_kommo`). Isso foi uma decisão deliberada da fase
