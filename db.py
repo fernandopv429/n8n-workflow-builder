@@ -379,38 +379,38 @@ def criar_cliente_rascunho(
     return linha[0]
 
 
-def _linha_para_cliente(r) -> dict:
-    return {
-        "id": r[0],
-        "cliente_nome": r[1],
-        "nicho": r[2],
-        "workflow_origem_id": r[3],
-        "status": r[4],
-        "workflow_novo_id": r[5],
-        "workflow_novo_url": r[6],
-        "criado_em": r[7].isoformat(),
-        "batch_id": r[8],
-        "batch_status": r[9],
-        "prompt_sugerido": r[10],
-        "estrutura_kommo_sugerida": r[11],
-        "imagem_pb_record_id": r[12],
-        "imagem_pb_filename": r[13],
-    }
+# Segredo não sai daqui: `obter_cliente` é devolvido pro navegador em
+# `GET /clientes/<id>`. O token do Kommo e a chave da OpenAI ficam cifrados no
+# banco e só são lidos pelas funções próprias (obter_credenciais_kommo,
+# obter_chave_openai_cliente), nunca pela leitura genérica.
+COLUNAS_SECRETAS = ("kommo_token_cifrado", "openai_api_key_cifrada")
+
+
+def _linha_para_cliente(cursor, r) -> dict:
+    """Mapeia pelo nome da coluna, não pela posição.
+
+    A versão anterior listava as colunas à mão no SELECT e no dict. Toda coluna
+    nova precisava ser acrescentada nos dois lugares, e quem esquecia não via
+    erro: o campo simplesmente chegava `None`. Foi assim que `openai_projeto_id`
+    e `evolution_instancia` ficaram invisíveis em 06/10/2026 — e, como a
+    exclusão do cliente usa esses campos pra arquivar o projeto da OpenAI e
+    apagar a instância do WhatsApp, a limpeza não acontecia e ninguém era
+    avisado.
+    """
+    nomes = [d[0] for d in cursor.description]
+    cliente = {}
+    for nome, valor in zip(nomes, r):
+        if nome in COLUNAS_SECRETAS:
+            continue
+        cliente[nome] = valor.isoformat() if hasattr(valor, "isoformat") else valor
+    return cliente
 
 
 def obter_cliente(cliente_id: int) -> dict | None:
     with _conectar() as conn:
-        r = conn.execute(
-            """
-            SELECT id, cliente_nome, nicho, workflow_origem_id, status,
-                   workflow_novo_id, workflow_novo_url, criado_em,
-                   batch_id, batch_status, prompt_sugerido, estrutura_kommo_sugerida,
-                   imagem_pb_record_id, imagem_pb_filename
-            FROM clientes WHERE id = %s
-            """,
-            (cliente_id,),
-        ).fetchone()
-    return _linha_para_cliente(r) if r else None
+        cur = conn.execute("SELECT * FROM clientes WHERE id = %s", (cliente_id,))
+        r = cur.fetchone()
+        return _linha_para_cliente(cur, r) if r else None
 
 
 def atualizar_resultado_batch(cliente_id: int, status: str, prompt_sugerido: str = None, estrutura_kommo_sugerida: dict = None):
@@ -429,17 +429,8 @@ def atualizar_resultado_batch(cliente_id: int, status: str, prompt_sugerido: str
 
 def listar_clientes() -> list:
     with _conectar() as conn:
-        linhas = conn.execute(
-            """
-            SELECT id, cliente_nome, nicho, workflow_origem_id, status,
-                   workflow_novo_id, workflow_novo_url, criado_em,
-                   batch_id, batch_status, prompt_sugerido, estrutura_kommo_sugerida,
-                   imagem_pb_record_id, imagem_pb_filename
-            FROM clientes
-            ORDER BY criado_em DESC
-            """
-        ).fetchall()
-    return [_linha_para_cliente(r) for r in linhas]
+        cur = conn.execute("SELECT * FROM clientes ORDER BY criado_em DESC")
+        return [_linha_para_cliente(cur, r) for r in cur.fetchall()]
 
 
 def marcar_cliente_clonado(cliente_id: int, manifesto, resultado: dict):
@@ -553,9 +544,7 @@ def obter_cliente_por_instancia(instancia: str) -> dict:
             "SELECT * FROM clientes WHERE evolution_instancia = %s", (instancia,)
         )
         linha = cur.fetchone()
-        if not linha:
-            return {}
-        return dict(zip([d[0] for d in cur.description], linha))
+        return _linha_para_cliente(cur, linha) if linha else {}
 
 
 def definir_instancia_evolution(cliente_id: int, instancia: str):
