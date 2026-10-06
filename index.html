@@ -287,6 +287,7 @@
       <button type="button" class="aba" data-aba="prompt">Prompt</button>
       <button type="button" class="aba" data-aba="atendimento">
         Atendimento <span id="atendimento-resumo" class="opcional"></span></button>
+      <button type="button" class="aba" data-aba="whatsapp">WhatsApp</button>
       <button type="button" class="aba" data-aba="consumo">Consumo</button>
       <button type="button" class="aba" data-aba="logs">Logs</button>
     </nav>
@@ -301,6 +302,10 @@
        SOBRE o cliente. Misturar os dois já confundiu na tela antiga. -->
   <div class="painel-aba" id="painel-atendimento" style="display:none">
     <div id="atendimento-lista"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-whatsapp" style="display:none">
+    <div id="whatsapp-conteudo"></div>
   </div>
 
   <div class="painel-aba" id="painel-consumo" style="display:none">
@@ -797,12 +802,58 @@ function trocarAba(nome) {
   if (nome === 'prompt') carregarBriefing();
   if (nome === 'atendimento') carregarAtendimento();
   if (nome === 'consumo') carregarConsumo();
+  if (nome === 'whatsapp') carregarWhatsapp();
 }
 
 document.getElementById('abas').addEventListener('click', ev => {
   const b = ev.target.closest('.aba');
   if (b) trocarAba(b.dataset.aba);
 });
+
+async function carregarWhatsapp() {
+  const caixa = document.getElementById('whatsapp-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let d;
+  try { d = await (await fetch(`/clientes/${clienteAtualId}/whatsapp`)).json(); }
+  catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+
+  if (d.status === 'nao configurada') {
+    caixa.innerHTML = `<div class="vazio">Este cliente ainda não tem número de WhatsApp.</div>
+      <button type="button" class="handoff-botao" id="btn-criar-wpp">Criar instância e conectar</button>`;
+  } else {
+    const ok = d.status === 'open';
+    // Webhook diferente do esperado é a falha silenciosa clássica: a instância
+    // conecta, recebe mensagem e não entrega a ninguém.
+    const webhookOk = !d.webhook || d.webhook === d.webhook_esperado;
+    caixa.innerHTML = `
+      <div class="consumo-total">${ok ? 'Conectado' : 'Desconectado'}
+        <span class="opcional">instância ${escaparHtml(d.instancia)}</span></div>
+      ${webhookOk ? '' : `<div class="alerta-fila">O webhook desta instância aponta para
+        <code>${escaparHtml(d.webhook)}</code>, não para o trilho. Mensagem que chegar
+        não vai pro agente. Clique abaixo para corrigir.</div>`}
+      <button type="button" class="handoff-botao" id="btn-criar-wpp">
+        ${ok ? 'Reapontar o webhook' : 'Conectar (mostrar QR)'}</button>
+      <div id="wpp-qr"></div>`;
+  }
+
+  document.getElementById('btn-criar-wpp').addEventListener('click', async (ev) => {
+    const b = ev.target; b.disabled = true; b.textContent = 'aguarde…';
+    const resp = await fetch(`/clientes/${clienteAtualId}/whatsapp`, { method: 'POST' });
+    const r = await resp.json();
+    b.disabled = false;
+    if (!resp.ok) { b.textContent = `erro: ${r.error}`; return; }
+    carregarLogs();
+    if (r.conectada) { carregarWhatsapp(); return; }
+    const alvo = document.getElementById('wpp-qr') || caixa;
+    alvo.innerHTML = r.qr_base64
+      ? `<p class="hint">Abra o WhatsApp do cliente → Aparelhos conectados → Conectar aparelho.
+           O código expira em cerca de 40 segundos; se expirar, clique de novo.</p>
+         <img src="${r.qr_base64}" alt="QR code" style="max-width:280px;border-radius:8px">
+         <p class="hint">Webhook já apontado para <code>${escaparHtml(r.webhook)}</code>.</p>`
+      : '<div class="vazio">Instância criada, mas sem QR — clique de novo.</div>';
+    b.textContent = 'Gerar outro QR';
+  });
+}
 
 async function carregarConsumo() {
   const caixa = document.getElementById('consumo-conteudo');

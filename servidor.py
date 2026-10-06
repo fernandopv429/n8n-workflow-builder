@@ -52,6 +52,7 @@ import openai_admin  # noqa: E402
 import pocketbase_client  # noqa: E402
 import cloner  # noqa: E402
 import cofre  # noqa: E402
+import evolution_client  # noqa: E402
 from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
 from manifest import ClienteManifest  # noqa: E402
@@ -85,6 +86,10 @@ ROTA_CONTATO_STATUS = re.compile(r"^/contatos/(\d+)/status$")
 ROTA_FILA = re.compile(r"^/fila$")
 ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
 ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
+# WhatsApp: criar a instância e conectar pelo QR, sem sair do painel. O passo
+# mais esquecido era o webhook — instância conectada sem webhook recebe
+# mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
+ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
 
 
 def _com_imagem(cliente: dict) -> dict:
@@ -248,6 +253,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if ROTA_FILA.match(self.path):
             self._responder_json(200, monitor_fila.resumo())
+            return
+
+        m = ROTA_CLIENTE_WHATSAPP.match(self.path)
+        if m:
+            cliente = db.obter_cliente(int(m.group(1)))
+            nome = (cliente or {}).get("evolution_instancia") or ""
+            if not nome or not evolution_client.disponivel():
+                self._responder_json(200, {"instancia": nome, "status": "nao configurada"})
+                return
+            try:
+                self._responder_json(200, {
+                    "instancia": nome, "status": evolution_client.status(nome),
+                    "webhook": evolution_client.obter_webhook(nome),
+                    "webhook_esperado": evolution_client.url_do_trilho()})
+            except evolution_client.EvolutionError as e:
+                self._responder_json(200, {"instancia": nome, "status": f"erro: {e}"})
             return
 
         m = ROTA_CLIENTE_CONSUMO.match(self.path)
@@ -519,6 +540,15 @@ class Handler(BaseHTTPRequestHandler):
         # Arquivar revoga as chaves do projeto. Sem isso a chave do cliente
         # continuaria valendo e gastando depois de ele sair do painel — e
         # ninguém lembra de limpar isso à mão no site da OpenAI.
+        if cliente.get("evolution_instancia") and evolution_client.disponivel():
+            try:
+                evolution_client.remover_instancia(cliente["evolution_instancia"])
+                relatorio.append(f"instância '{cliente['evolution_instancia']}' removida da Evolution")
+            except Exception as e:  # noqa: BLE001
+                relatorio.append(
+                    f"ATENÇÃO: a instância '{cliente['evolution_instancia']}' continua na "
+                    f"Evolution, conectada ao WhatsApp do cliente: {e}")
+
         if cliente.get("openai_projeto_id"):
             try:
                 openai_admin.arquivar_projeto(cliente["openai_projeto_id"])
@@ -543,6 +573,48 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         if not self._autenticado():
             return
+
+        m = ROTA_CLIENTE_WHATSAPP.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            cliente = db.obter_cliente(cliente_id)
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            if not evolution_client.disponivel():
+                self._responder_json(503, {"error": "EVOLUTION_URL/EVOLUTION_APIKEY não configuradas"})
+                return
+
+            nome = (cliente.get("evolution_instancia")
+                    or evolution_client.nome_da_instancia(cliente["cliente_nome"]))
+            try:
+                if not evolution_client.existe(nome):
+                    criada = evolution_client.criar_instancia(nome)
+                    db.definir_instancia_evolution(cliente_id, nome)
+                    db.registrar_log(
+                        cliente_id, "sistema",
+                        f"Instância de WhatsApp '{nome}' criada na Evolution, com o webhook "
+                        f"já apontado pro trilho ({criada['webhook']}). Falta escanear o QR.")
+                    self._responder_json(200, {**criada, "novo": True})
+                    return
+
+                # já existe: reaponta o webhook (idempotente) e devolve QR novo —
+                # o anterior expira em ~40s, então pedir outro é o caso comum
+                evolution_client.definir_webhook(nome)
+                db.definir_instancia_evolution(cliente_id, nome)
+                estado = evolution_client.status(nome)
+                if estado == "open":
+                    self._responder_json(200, {"nome": nome, "status": estado, "conectada": True,
+                                               "webhook": evolution_client.url_do_trilho()})
+                    return
+                qr = evolution_client.obter_qr(nome)
+                self._responder_json(200, {"nome": nome, "status": estado, "conectada": False,
+                                           "webhook": evolution_client.url_do_trilho(), **qr})
+                return
+            except evolution_client.EvolutionError as e:
+                db.registrar_log(cliente_id, "erro", f"Evolution: {e}")
+                self._responder_json(502, {"error": str(e)})
+                return
 
         m = ROTA_CLIENTE_PROMPT.match(self.path)
         if m:
