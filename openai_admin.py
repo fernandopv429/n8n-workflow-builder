@@ -128,14 +128,19 @@ def consumo_do_projeto(projeto_id: str, dias: int = 30) -> dict:
     if not disponivel():
         return {"disponivel": False, "motivo": "OPENAI_ADMIN_KEY não configurada", "dias": dias}
 
+    # `limit` é o número de BALDES, não de linhas, e o padrão é um balde por
+    # dia. A OpenAI recusa acima de 31 ("Limit exceeds the maximum allowed value
+    # of 31 for the given bucket_width") — com 180 a aba Consumo falhava sempre,
+    # pra todo cliente que tivesse projeto.
+    dias = max(1, min(dias, 31))
     inicio = int(time.time()) - dias * 24 * 3600
     try:
         custos = _chamar(
-            "GET", f"/costs?start_time={inicio}&group_by[]=project_id&limit=180")
+            "GET", f"/costs?start_time={inicio}&group_by[]=project_id&limit={dias}")
         uso = _chamar(
             "GET",
             f"/usage/completions?start_time={inicio}&group_by[]=project_id"
-            f"&group_by[]=model&limit=180")
+            f"&group_by[]=model&limit={dias}")
     except OpenAiAdminError as e:
         return {"disponivel": False, "motivo": str(e), "dias": dias}
 

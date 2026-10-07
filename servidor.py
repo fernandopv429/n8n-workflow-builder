@@ -90,6 +90,11 @@ ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
 # mais esquecido era o webhook — instância conectada sem webhook recebe
 # mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
 ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
+# Projeto da OpenAI por cliente, SEM depender de Kommo nem de clonagem. Antes
+# isso só acontecia dentro de PUT /credenciais, que exige Kommo e dispara o
+# clone inteiro — herança do desenho antigo. Quem só queria medir consumo
+# ficava preso num 400, sem nem log pra explicar.
+ROTA_CLIENTE_OPENAI = re.compile(r"^/clientes/(\d+)/openai$")
 
 
 def _com_imagem(cliente: dict) -> dict:
@@ -332,6 +337,45 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_OPENAI.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            cliente = db.obter_cliente(cliente_id)
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            if cliente.get("openai_projeto_id"):
+                self._responder_json(200, {"ja_existia": True,
+                                           "projeto_id": cliente["openai_projeto_id"]})
+                return
+            if not openai_admin.disponivel():
+                self._responder_json(503, {"error": "OPENAI_ADMIN_KEY não configurada no servidor"})
+                return
+            try:
+                criado = openai_admin.criar_projeto_e_chave(cliente["cliente_nome"])
+            except openai_admin.OpenAiAdminError as e:
+                db.registrar_log(cliente_id, "erro", f"OpenAI Admin API: {e}")
+                self._responder_json(502, {"error": str(e)})
+                return
+            if not cofre.disponivel():
+                # sem cofre a chave não tem onde ser guardada, e um projeto sem
+                # chave guardada é pior que nenhum: some do nosso alcance
+                openai_admin.arquivar_projeto(criado["projeto_id"])
+                self._responder_json(503, {"error":
+                    "COFRE_CHAVE não configurada — sem ela a chave do cliente não pode "
+                    "ser guardada com segurança. O projeto criado foi desfeito."})
+                return
+            db.definir_projeto_openai(cliente_id, criado["projeto_id"],
+                                      cofre.cifrar(criado["api_key"]))
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Projeto '{criado['projeto_nome']}' criado na OpenAI "
+                f"({criado['projeto_id']}) com chave própria, guardada cifrada. "
+                "O consumo deste cliente passa a ser medido separado.")
+            self._responder_json(200, {"projeto_id": criado["projeto_id"],
+                                       "projeto_nome": criado["projeto_nome"]})
             return
 
         m = ROTA_CLIENTE_WHATSAPP.match(self.path)

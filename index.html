@@ -862,7 +862,26 @@ async function carregarConsumo() {
   try { d = await (await fetch(`/clientes/${clienteAtualId}/consumo`)).json(); }
   catch (e) { caixa.textContent = 'falha ao consultar o consumo.'; return; }
 
-  if (!d.disponivel) { caixa.innerHTML = `<div class="vazio">${escaparHtml(d.motivo)}</div>`; return; }
+  if (!d.disponivel) {
+    // Botão junto do aviso: sem ele a pessoa lê o motivo e não tem o que fazer
+    // ali — tinha que sair, abrir a engrenagem e preencher Kommo, que não tem
+    // nada a ver com medir consumo.
+    const podeCriar = d.motivo && d.motivo.includes('engrenagem');
+    caixa.innerHTML = `<div class="vazio">${escaparHtml(d.motivo)}</div>` +
+      (podeCriar ? '<button type="button" class="handoff-botao" id="btn-criar-proj">' +
+                   'Criar projeto na OpenAI para este cliente</button>' : '');
+    if (podeCriar) {
+      document.getElementById('btn-criar-proj').addEventListener('click', async (ev) => {
+        const b = ev.target; b.disabled = true; b.textContent = 'criando…';
+        const resp = await fetch(`/clientes/${clienteAtualId}/openai`, { method: 'POST' });
+        const r = await resp.json();
+        if (!resp.ok) { b.textContent = `erro: ${r.error}`; b.disabled = false; return; }
+        carregarLogs();
+        carregarConsumo();
+      });
+    }
+    return;
+  }
 
   const linhas = (d.por_modelo || []).map(m => `
     <tr><td>${escaparHtml(m.modelo)}</td>
