@@ -1,0 +1,108 @@
+# Pilha completa, pra rodar na sua máquina: banco, fila, painel e worker.
+#
+#     docker compose -f docker-compose.local.yaml up --build
+#     painel em http://localhost:8099   (usuário admin, senha abaixo)
+#     RabbitMQ em http://localhost:15672
+#
+# NÃO é o arquivo de produção. Produção usa `docker-compose.yaml`, que aponta
+# pro Postgres e pro RabbitMQ compartilhados em 85.31.63.37. Três motivos:
+#
+# 1. O trilho do n8n publica na fila, e o n8n é outro recurso do Coolify, fora
+#    desta rede. Fila dentro do compose = o n8n não alcança = nada chega no
+#    worker. Este é o impeditivo de verdade.
+# 2. O banco de produção já tem cliente, conversa e log. Um Postgres novo sobe
+#    vazio.
+# 3. Redis não entra: nenhuma linha do nosso código usa. Ele está reservado pra
+#    quando houver mais de um worker e for preciso travar a ordem por contato
+#    (ARQUITETURA-AGENTE.md). Subir container que ninguém usa é só memória.
+#
+# Serve pra: mexer no painel sem tocar em dado de cliente, testar migração de
+# schema, e ter a receita de levantar tudo do zero se o servidor sumir.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: local
+      POSTGRES_DB: agentes
+    ports: ["5433:5432"]   # 5433 pra não brigar com um Postgres já instalado
+    volumes: ["dados_postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: agente
+      RABBITMQ_DEFAULT_PASS: local
+      RABBITMQ_DEFAULT_VHOST: agente
+    ports: ["5672:5672", "15672:15672"]
+    volumes: ["dados_rabbitmq:/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      retries: 10
+
+  filas:
+    # Declara as filas e o dead-letter antes do worker subir. Fica num serviço
+    # próprio, e não no worker, porque redeclarar fila com argumento diferente
+    # devolve PRECONDITION_FAILED e derruba o consumidor em loop.
+    build: .
+    command: ["python3", "infra_filas.py", "--aplicar"]
+    environment:
+      RABBITMQ_URL: amqp://agente:local@rabbitmq:5672/agente
+      RABBITMQ_PAINEL: http://rabbitmq:15672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  painel:
+    build: .
+    restart: unless-stopped
+    ports: ["8099:8099"]
+    environment:
+      PAPEL: painel
+      PAINEL_USUARIO: admin
+      PAINEL_SENHA: local
+      DATABASE_URL: postgres://postgres:local@postgres:5432/agentes
+      RABBITMQ_URL: amqp://agente:local@rabbitmq:5672/agente
+      RABBITMQ_PAINEL: http://rabbitmq:15672
+      RABBITMQ_AGENTE_URL: amqp://agente:local@rabbitmq:5672/agente
+      # Credenciais reais vêm do .env — sem elas o painel sobe igual, só não
+      # fala com n8n/OpenAI/Kommo. Pra mexer em layout, é o suficiente.
+      N8N_URL: ${N8N_URL:-}
+      N8N_API_KEY: ${N8N_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_ADMIN_KEY: ${OPENAI_ADMIN_KEY:-}
+      COFRE_CHAVE: ${COFRE_CHAVE:-}
+      EVOLUTION_URL: ${EVOLUTION_URL:-}
+      EVOLUTION_APIKEY: ${EVOLUTION_APIKEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    environment:
+      PAPEL: worker
+      DATABASE_URL: postgres://postgres:local@postgres:5432/agentes
+      RABBITMQ_AGENTE_URL: amqp://agente:local@rabbitmq:5672/agente
+      N8N_URL: ${N8N_URL:-}
+      N8N_API_KEY: ${N8N_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      COFRE_CHAVE: ${COFRE_CHAVE:-}
+      EVOLUTION_URL: ${EVOLUTION_URL:-}
+      EVOLUTION_APIKEY: ${EVOLUTION_APIKEY:-}
+    depends_on:
+      filas:
+        condition: service_completed_successfully
+
+volumes:
+  dados_postgres:
+  dados_rabbitmq:

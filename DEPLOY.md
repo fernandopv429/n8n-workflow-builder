@@ -67,7 +67,27 @@ O worker continua sendo um processo separado: redeploy do painel não derruba
 conversa de paciente, e a `OPENAI_ADMIN_KEY` não entra no processo que lê texto
 escrito por desconhecido no WhatsApp (ver comentários no próprio compose).
 
-Para rodar local: `docker compose up --build` (lê o `.env` da pasta).
+### Rodar a pilha inteira na sua máquina
+
+`docker-compose.local.yaml` sobe banco, fila, painel e worker juntos:
+
+```bash
+docker compose -f docker-compose.local.yaml up --build
+```
+
+Painel em http://localhost:8099 (admin / local), RabbitMQ em
+http://localhost:15672. Serve pra mexer no painel sem tocar em dado de cliente
+e pra ter a receita de levantar tudo do zero se o servidor sumir.
+
+**Não serve pra produção**, e o motivo não é preferência: o trilho do n8n
+publica na fila, e o n8n é outro recurso do Coolify, fora dessa rede. Fila
+dentro do compose significa n8n sem alcance e nada chegando no worker. Além
+disso o Postgres de produção já tem cliente, conversa e log — um banco novo
+subiria vazio.
+
+Redis não entra em nenhum dos dois: nenhuma linha do código usa hoje. Ele está
+reservado pra quando houver mais de um worker e for preciso travar a ordem por
+contato (ARQUITETURA-AGENTE.md).
 
 ## 3.2 Alternativa: dois recursos separados
 
