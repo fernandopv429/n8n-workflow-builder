@@ -67,6 +67,18 @@ O worker continua sendo um processo separado: redeploy do painel não derruba
 conversa de paciente, e a `OPENAI_ADMIN_KEY` não entra no processo que lê texto
 escrito por desconhecido no WhatsApp (ver comentários no próprio compose).
 
+**O domínio em Docker Compose vai por variável, não pelo campo Domains.** O
+Coolify ignora aquele campo nesse build pack e usa
+`SERVICE_FQDN_<serviço>_<porta>`. Para o painel:
+
+```
+SERVICE_FQDN_PAINEL_8099=https://engine.a5ecossistema.tech
+```
+
+Sem ela o Coolify gera um domínio aleatório, e o domínio real responde
+`no available server` — o proxy não tem container ligado a ele. O `worker` não
+leva nenhuma: ele não escuta HTTP.
+
 ### Rodar a pilha inteira na sua máquina
 
 `docker-compose.local.yaml` sobe banco, fila, painel e worker juntos:

@@ -19,9 +19,13 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      # Coolify gera o domínio e injeta aqui. Rodando local isso fica vazio e
-      # não atrapalha.
-      - SERVICE_FQDN_PAINEL_8099
+      # Como o Coolify liga o domínio a este serviço. Em Docker Compose ele
+      # IGNORA o campo "Domains" do recurso e usa esta variável mágica
+      # (SERVICE_FQDN_<serviço>_<porta>). Declarada sem valor, ele gera um
+      # domínio aleatório — foi o que fez o domínio real responder
+      # "no available server" em 07/10/2026. Cadastre em Environment Variables:
+      #     SERVICE_FQDN_PAINEL_8099=https://engine.a5ecossistema.tech
+      - SERVICE_FQDN_PAINEL_8099=${SERVICE_FQDN_PAINEL_8099:-}
       - PAPEL=painel
       - PORT=8099
       - PAINEL_USUARIO=${PAINEL_USUARIO:-admin}
