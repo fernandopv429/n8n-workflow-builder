@@ -810,6 +810,55 @@ document.getElementById('abas').addEventListener('click', ev => {
   if (b) trocarAba(b.dataset.aba);
 });
 
+// O QR expira em ~40s e a conexão acontece no celular, sem avisar o navegador.
+// Sem isto a pessoa escaneia e fica olhando um código morto, sem saber se deu
+// certo — foi o que o Fernando descreveu em 07/10/2026.
+let timerQr = null;
+
+function pararQr() {
+  if (timerQr) { clearInterval(timerQr); timerQr = null; }
+}
+
+function mostrarQr(r) {
+  pararQr();
+  const alvo = document.getElementById('wpp-qr');
+  if (!alvo) return;
+  if (!r.qr_base64) {
+    alvo.innerHTML = '<div class="vazio">Instância criada, mas sem QR — clique em "Gerar outro QR".</div>';
+    return;
+  }
+  const expira = 40;
+  alvo.innerHTML = `
+    <p class="hint">No celular que vai atender: WhatsApp → Aparelhos conectados →
+      Conectar aparelho.</p>
+    <img src="${r.qr_base64}" alt="QR code" style="max-width:280px;border-radius:8px">
+    <p class="hint" id="qr-estado">Aguardando leitura… o código expira em ${expira}s.</p>`;
+
+  const cliente = clienteAtualId;
+  let restante = expira;
+  timerQr = setInterval(async () => {
+    if (clienteAtualId !== cliente || abaAtual !== 'whatsapp') { pararQr(); return; }
+    restante -= 3;
+    const estado = document.getElementById('qr-estado');
+    if (!estado) { pararQr(); return; }
+
+    let d;
+    try { d = await (await fetch(`/clientes/${cliente}/whatsapp`)).json(); }
+    catch (e) { return; }
+
+    if (d.status === 'open') {
+      pararQr();
+      carregarLogs();
+      carregarWhatsapp();     // redesenha já como "Conectado"
+      return;
+    }
+    estado.textContent = restante > 0
+      ? `Aguardando leitura… o código expira em ${restante}s.`
+      : 'Este código expirou. Clique em "Gerar outro QR".';
+    if (restante <= 0) pararQr();
+  }, 3000);
+}
+
 async function carregarWhatsapp() {
   const caixa = document.getElementById('whatsapp-conteudo');
   caixa.innerHTML = 'carregando…';
@@ -844,13 +893,7 @@ async function carregarWhatsapp() {
     if (!resp.ok) { b.textContent = `erro: ${r.error}`; return; }
     carregarLogs();
     if (r.conectada) { carregarWhatsapp(); return; }
-    const alvo = document.getElementById('wpp-qr') || caixa;
-    alvo.innerHTML = r.qr_base64
-      ? `<p class="hint">Abra o WhatsApp do cliente → Aparelhos conectados → Conectar aparelho.
-           O código expira em cerca de 40 segundos; se expirar, clique de novo.</p>
-         <img src="${r.qr_base64}" alt="QR code" style="max-width:280px;border-radius:8px">
-         <p class="hint">Webhook já apontado para <code>${escaparHtml(r.webhook)}</code>.</p>`
-      : '<div class="vazio">Instância criada, mas sem QR — clique de novo.</div>';
+    mostrarQr(r);
     b.textContent = 'Gerar outro QR';
   });
 }
@@ -1013,6 +1056,7 @@ async function carregarChat() {
 let timerLote = null;
 
 function pararEspera() {
+  pararQr();
   if (timerLote) { clearTimeout(timerLote); timerLote = null; }
   document.getElementById('chat-aguardando')?.remove();
 }

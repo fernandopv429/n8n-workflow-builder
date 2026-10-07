@@ -221,6 +221,12 @@ def _workflow_saida(cred_id: str) -> dict:
                 "typeVersion": 1.1,
                 "position": [0, 0],
                 "parameters": {
+                    # O trigger do RabbitMQ chama este campo de `name`, não de
+                    # `queue` como o node comum. Com o nome errado o n8n declara
+                    # uma fila VAZIA e falha com
+                    # `no queue '' in vhost 'agente'` — foi o que aconteceu em
+                    # 07/10/2026. Mando os dois: o que não for usado é ignorado.
+                    "name": "agente.saida",
                     "queue": "agente.saida",
                     "options": {
                         # ack só depois do envio: se o Evolution falhar, a
