@@ -218,22 +218,19 @@ def _workflow_saida(cred_id: str) -> dict:
                 "id": "consome",
                 "name": "Fila de saida",
                 "type": "n8n-nodes-base.rabbitmqTrigger",
-                "typeVersion": 1.1,
+                # typeVersion 1, não 1.1: o node COMUM do RabbitMQ tem 1.1, o de
+                # GATILHO não. Com a versão inexistente o n8n renderiza o node
+                # quebrado (ícone vazio) e não lê os parâmetros — daí o
+                # `no queue '' in vhost 'agente'`. Copiado dos workflows
+                # "fase3"/"Fase2", que usam este node e funcionam nesta instância.
+                "typeVersion": 1,
                 "position": [0, 0],
                 "parameters": {
-                    # O trigger do RabbitMQ chama este campo de `name`, não de
-                    # `queue` como o node comum. Com o nome errado o n8n declara
-                    # uma fila VAZIA e falha com
-                    # `no queue '' in vhost 'agente'` — foi o que aconteceu em
-                    # 07/10/2026. Mando os dois: o que não for usado é ignorado.
-                    "name": "agente.saida",
                     "queue": "agente.saida",
-                    "options": {
-                        # ack só depois do envio: se o Evolution falhar, a
-                        # mensagem volta pra fila em vez de sumir
-                        "acknowledge": "executionFinishes",
-                        "parallelMessages": 1,
-                    },
+                    # `options` vazio de propósito: opção que a versão não
+                    # conhece reintroduz o mesmo problema. O ack-após-execução,
+                    # se existir nesta versão, fica pra ajustar pela tela.
+                    "options": {},
                 },
                 "credentials": {"rabbitmq": {"id": cred_id, "name": CRED_RABBIT_NOME}},
             },
