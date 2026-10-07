@@ -76,12 +76,22 @@ def _cliente_openai(cliente: dict):
     except Exception as e:  # noqa: BLE001 — cofre mal configurado não derruba atendimento
         db.registrar_log(cliente["id"], "erro", f"[worker] não li a chave do cliente: {e}")
     if not chave:
+        # `[...]` levantaria KeyError e derrubaria o processamento da mensagem
+        # sem dizer o motivo. Faltar chave é configuração, não defeito — merece
+        # mensagem que diga o que fazer.
+        chave = config.carregar_env().get("OPENAI_API_KEY", "").strip()
+        if not chave:
+            raise ValueError(
+                f"cliente '{cliente['cliente_nome']}' não tem chave própria da OpenAI e "
+                "não há OPENAI_API_KEY configurada no worker. Cadastre as credenciais "
+                "pela engrenagem do painel (que cria o projeto e a chave do cliente), "
+                "ou defina OPENAI_API_KEY como fallback."
+            )
         db.registrar_log(
             cliente["id"], "sistema",
             "[worker] sem chave própria da OpenAI — usando a global. O consumo "
             "desta conversa NÃO vai aparecer no projeto deste cliente.",
         )
-        chave = config.carregar_env()["OPENAI_API_KEY"]
     return OpenAI(api_key=chave)
 
 
