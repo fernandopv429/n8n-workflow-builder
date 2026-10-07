@@ -95,9 +95,53 @@ def _cliente_openai(cliente: dict):
     return OpenAI(api_key=chave)
 
 
-def _ferramentas_kommo() -> list:
-    """Só Kommo — sem nenhuma ferramenta de edição de workflow. Ver cabeçalho."""
-    return agente_chat._preparar_ferramentas_kommo()
+# Decisão do Fernando em 07/10/2026: por enquanto o agente que fala com o
+# paciente NÃO tem ferramenta nenhuma do Kommo. Editar campo, mover etapa e
+# mexer em funil continua no chat do painel, que é operado por gente da A5.
+#
+# Não é só organização — é o que fecha o buraco: o texto que chega aqui foi
+# escrito por um desconhecido no WhatsApp, e a lista anterior incluía
+# kommo_excluir_funil. Ferramenta ausente não tem como ser abusada; trava pode
+# falhar. Quando fizer sentido devolver alguma (mover lead de etapa é a
+# candidata), basta acrescentar o nome aqui — a checagem em `_executar` já
+# recusa qualquer coisa fora desta lista.
+FERRAMENTAS_PERMITIDAS = set()
+
+FERRAMENTA_HUMANO = {
+    "type": "function",
+    "function": {
+        "name": "chamar_humano",
+        "description": (
+            "Passa a conversa pra um atendente humano e PARA de responder este "
+            "contato. Use quando o paciente pedir uma pessoa, quando houver "
+            "reclamação séria, assunto clínico que você não pode decidir, ou "
+            "quando você já tentou e não resolveu. Depois disso o atendente "
+            "assume no painel; você não volta a responder sozinho."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "motivo": {
+                    "type": "string",
+                    "description": "Por que está passando — aparece no painel pro atendente.",
+                }
+            },
+            "required": ["motivo"],
+        },
+    },
+}
+
+
+def _ferramentas_do_agente() -> list:
+    """Só o que a lista permite, mais o handoff.
+
+    Com FERRAMENTAS_PERMITIDAS vazia, nem chega a consultar o MCP do Kommo — o
+    que de quebra tira o worker da dependência de o MCP estar de pé pra atender.
+    """
+    if not FERRAMENTAS_PERMITIDAS:
+        return [FERRAMENTA_HUMANO]
+    todas = agente_chat._preparar_ferramentas_kommo()
+    return [f for f in todas if f["function"]["name"] in FERRAMENTAS_PERMITIDAS] + [FERRAMENTA_HUMANO]
 
 
 def _system_prompt(cliente: dict) -> str:
@@ -119,7 +163,18 @@ def _system_prompt(cliente: dict) -> str:
         "reenvie todas, senão as que faltarem são removidas.\n"
         "- Se uma chamada falhar, leia o erro: ele traz `path` e `code` do campo "
         "exato. Não repita a mesma chamada esperando resultado diferente.\n"
-        "- Nunca invente resultado de ferramenta."
+        "- Nunca invente resultado de ferramenta.\n\n"
+        "QUANDO CHAMAR UM HUMANO (ferramenta `chamar_humano`):\n"
+        "- O paciente pedir uma pessoa, um atendente, 'falar com alguém' — mesmo "
+        "que de forma indireta. Não insista em resolver sozinho nem ignore o "
+        "pedido: chame na hora.\n"
+        "- Reclamação séria, pedido de cancelamento ou reembolso, ou qualquer "
+        "sinal de que a pessoa está irritada.\n"
+        "- Pergunta clínica, diagnóstico, medicação ou urgência de saúde — você "
+        "não decide isso.\n"
+        "- Você já tentou e não resolveu.\n"
+        "Depois de chamar, diga ao paciente em UMA frase que um atendente vai "
+        "assumir, e pare. Não continue a conversa."
     )
 
 
@@ -129,8 +184,19 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
     mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in historico]
 
-    credenciais = n8n_edicao.credenciais_kommo(cliente)
-    ferramentas = _ferramentas_kommo()
+    # `texto` era recebido e ignorado: o contexto saía só do histórico, e isso
+    # só funcionava porque `processar` salva a mensagem antes de chamar aqui.
+    # Quem chamasse direto (teste, reprocessamento) recebia o agente respondendo
+    # no vazio. Acrescentar quando ainda não está no histórico torna a função
+    # correta sozinha, sem depender da ordem de quem chama.
+    ultima = historico[-1] if historico else None
+    if texto and not (ultima and ultima["role"] == "user" and ultima["conteudo"] == texto):
+        mensagens.append({"role": "user", "content": texto})
+
+    # Só busca credencial do Kommo se alguma ferramenta dele estiver liberada:
+    # senão uma falha no n8n/MCP derrubaria um atendimento que não precisa deles.
+    credenciais = n8n_edicao.credenciais_kommo(cliente) if FERRAMENTAS_PERMITIDAS else {}
+    ferramentas = _ferramentas_do_agente()
     openai = _cliente_openai(cliente)
 
     for _ in range(MAX_RODADAS):
@@ -148,7 +214,7 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
                 args = json.loads(chamada.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            resultado = _executar(nome, args, credenciais, cliente["id"])
+            resultado = _executar(nome, args, credenciais, cliente["id"], contato["id"])
             mensagens.append({
                 "role": "tool", "tool_call_id": chamada.id, "content": resultado[:4000]
             })
@@ -156,9 +222,27 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     return "Não consegui concluir agora — já pedi ajuda de um atendente."
 
 
-def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int) -> str:
+def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
+              contato_id: int = 0) -> str:
     """Mesmas travas do painel: elas valem mais aqui, onde o pedido veio de fora."""
     try:
+        if nome == "chamar_humano":
+            motivo = str(args.get("motivo") or "sem motivo informado")
+            db.definir_status_contato(contato_id, "HUMANO")
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"[worker] conversa passada pra atendente humano. Motivo: {motivo}",
+            )
+            return ("ok: um atendente foi chamado e assume a partir de agora. "
+                    "Avise o paciente em uma frase e não responda mais nada.")
+
+        # Defesa em profundidade: mesmo que uma ferramenta fora da lista chegue
+        # aqui (bug nosso, ou mudança no MCP), ela não executa.
+        if nome not in FERRAMENTAS_PERMITIDAS:
+            db.registrar_log(cliente_id, "erro",
+                             f"[worker] bloqueado: '{nome}' não é permitida no atendimento")
+            return f"erro: a ferramenta '{nome}' não está disponível neste atendimento"
+
         args = agente_chat._normalizar_args_kommo(args)
         if nome == "kommo_criar_funil":
             args, erro = agente_chat._guarda_criar_funil(args)
