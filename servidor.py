@@ -277,8 +277,25 @@ class Handler(BaseHTTPRequestHandler):
             if cliente is None:
                 self._responder_json(404, {"error": "cliente não encontrado"})
                 return
-            self._responder_json(200, openai_admin.consumo_do_projeto(
-                cliente.get("openai_projeto_id") or ""))
+            # Sem projeto, a causa muda conforme o estado do cliente, e dizer
+            # a errada manda a pessoa procurar no lugar errado: num cliente
+            # recém-criado não é herança nenhuma, é só um passo que falta.
+            projeto = cliente.get("openai_projeto_id") or ""
+            if not projeto:
+                if cliente["status"] == "rascunho":
+                    motivo = ("Este cliente ainda não tem credenciais salvas. Abra a "
+                              "engrenagem, deixe o campo da chave da OpenAI VAZIO e salve — "
+                              "aí o painel cria o projeto dele e o consumo passa a aparecer aqui.")
+                elif not openai_admin.disponivel():
+                    motivo = ("OPENAI_ADMIN_KEY não está configurada no servidor, então o "
+                              "painel não consegue criar projeto por cliente.")
+                else:
+                    motivo = ("Este cliente foi configurado com uma chave da OpenAI colada à "
+                              "mão, ou antes da separação por projeto. Salve as credenciais de "
+                              "novo com o campo da chave VAZIO pra ele ganhar projeto próprio.")
+                self._responder_json(200, {"disponivel": False, "motivo": motivo, "dias": 30})
+                return
+            self._responder_json(200, openai_admin.consumo_do_projeto(projeto))
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)
