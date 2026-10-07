@@ -48,7 +48,28 @@ projeto nenhum. Cria e apaga projetos, chaves e membros de toda a conta OpenAI
 do Grupo A5. Quem tiver acesso às variáveis do Coolify tem isso — mesmo nível
 de cuidado da senha do painel.
 
-## 3.1 O worker do agente é um SEGUNDO recurso
+## 3.1 Jeito recomendado: Docker Compose (painel + worker juntos)
+
+**New Resource → Application → Docker Compose**, mesmo repositório. O
+`docker-compose.yaml` na raiz sobe os dois serviços de uma vez:
+
+| serviço | `PAPEL` | porta | domínio |
+|---|---|---|---|
+| `painel` | `painel` | 8099 | sim (o Coolify gera) |
+| `worker` | `worker` | nenhuma | não |
+
+As variáveis são cadastradas **uma vez só**, em Environment Variables, e o
+compose distribui pra cada serviço o que ele precisa. Isso evita o problema de
+duas cópias divergirem — trocar a `COFRE_CHAVE` num recurso e esquecer o outro
+faz o worker parar de decifrar o token do Kommo, sem erro óbvio.
+
+O worker continua sendo um processo separado: redeploy do painel não derruba
+conversa de paciente, e a `OPENAI_ADMIN_KEY` não entra no processo que lê texto
+escrito por desconhecido no WhatsApp (ver comentários no próprio compose).
+
+Para rodar local: `docker compose up --build` (lê o `.env` da pasta).
+
+## 3.2 Alternativa: dois recursos separados
 
 O painel e o worker são processos diferentes e sobem separados — mesma imagem,
 mesmo repositório, só muda a variável `PAPEL`:

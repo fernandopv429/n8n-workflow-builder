@@ -1,0 +1,83 @@
+# Painel + worker num recurso só.
+#
+# Antes eram dois recursos no Coolify, cada um com sua cópia das variáveis — e
+# duas cópias divergem: basta trocar a COFRE_CHAVE num e esquecer o outro pro
+# worker parar de decifrar o token do Kommo. Aqui as variáveis são declaradas
+# uma vez e as duas vias usam as mesmas.
+#
+# Os dois continuam sendo PROCESSOS separados, que é o que importa:
+# redeploy do painel não derruba conversa de paciente, e a OPENAI_ADMIN_KEY
+# (que apaga projetos da organização inteira) não entra no processo que lê
+# texto escrito por desconhecido no WhatsApp. Ver ARQUITETURA-AGENTE.md.
+#
+# Local:   docker compose up --build        (lê o .env da pasta)
+# Coolify: Build Pack = Docker Compose; as variáveis vêm de Environment
+#          Variables e são substituídas nos ${...} abaixo.
+
+services:
+  painel:
+    build: .
+    restart: unless-stopped
+    environment:
+      # Coolify gera o domínio e injeta aqui. Rodando local isso fica vazio e
+      # não atrapalha.
+      - SERVICE_FQDN_PAINEL_8099
+      - PAPEL=painel
+      - PORT=8099
+      - PAINEL_USUARIO=${PAINEL_USUARIO:-admin}
+      - PAINEL_SENHA=${PAINEL_SENHA}
+      - DATABASE_URL=${DATABASE_URL}
+      - N8N_URL=${N8N_URL}
+      - N8N_API_KEY=${N8N_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_ADMIN_KEY=${OPENAI_ADMIN_KEY}
+      - COFRE_CHAVE=${COFRE_CHAVE}
+      - RABBITMQ_URL=${RABBITMQ_URL}
+      - RABBITMQ_PAINEL=${RABBITMQ_PAINEL}
+      - RABBITMQ_AGENTE_URL=${RABBITMQ_AGENTE_URL}
+      - EVOLUTION_URL=${EVOLUTION_URL}
+      - EVOLUTION_APIKEY=${EVOLUTION_APIKEY}
+      - POCKETBASE_URL=${POCKETBASE_URL}
+      - POCKETBASE_ADMIN_EMAIL=${POCKETBASE_ADMIN_EMAIL}
+      - POCKETBASE_ADMIN_PASSWORD=${POCKETBASE_ADMIN_PASSWORD}
+      - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
+      - SOURCE_COMMIT=${SOURCE_COMMIT:-}
+    healthcheck:
+      # /saude é a única rota sem autenticação, justamente pra isto. Devolve 503
+      # quando o Postgres não responde, então container de pé com banco fora não
+      # passa por saudável.
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8099/saude', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    # Sem `ports` e sem domínio: o worker não escuta HTTP. Não há porta aberta,
+    # não há senha, não há como chamá-lo de fora — ele só consome a fila.
+    environment:
+      - PAPEL=worker
+      - DATABASE_URL=${DATABASE_URL}
+      - N8N_URL=${N8N_URL}
+      - N8N_API_KEY=${N8N_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - COFRE_CHAVE=${COFRE_CHAVE}
+      - RABBITMQ_AGENTE_URL=${RABBITMQ_AGENTE_URL}
+      - EVOLUTION_URL=${EVOLUTION_URL}
+      - EVOLUTION_APIKEY=${EVOLUTION_APIKEY}
+      - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
+      # De propósito FORA daqui, e não por esquecimento:
+      #   PAINEL_SENHA      — o worker não serve HTTP
+      #   OPENAI_ADMIN_KEY  — apaga projetos e chaves da organização inteira;
+      #                       não entra no processo que lê texto de desconhecido
+      #   POCKETBASE_*      — imagem de card é assunto do painel
+      #   RABBITMQ_URL      — é a credencial de admin do broker; o worker usa a
+      #                       escopada (RABBITMQ_AGENTE_URL), que não enxerga as
+      #                       filas dos outros projetos da A5
+    depends_on:
+      painel:
+        # O painel cria o schema do banco na subida (db.garantir_schema). Sem
+        # esperar, o worker poderia consumir a fila antes das tabelas existirem.
+        condition: service_healthy
