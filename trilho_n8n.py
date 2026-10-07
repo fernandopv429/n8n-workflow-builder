@@ -37,6 +37,10 @@ CAMINHO_WEBHOOK = "a5-trilho-entrada"
 CRED_RABBIT_NOME = "A5 Agente RabbitMQ"
 CRED_RABBIT_TIPO = "rabbitmq"
 
+# Credencial do Evolution já existente no n8n, usada pelos workflows atuais.
+CRED_EVOLUTION_ID = "kDkNqoImm6fZEdkx"
+CRED_EVOLUTION_NOME = "Evolution account"
+
 
 def _conf_rabbit() -> dict:
     """Credencial do RabbitMQ pro n8n, a partir da URL do worker.
@@ -230,7 +234,10 @@ def _workflow_saida(cred_id: str) -> dict:
             {
                 "id": "envia",
                 "name": "Enviar texto",
-                "type": "n8n-nodes-base.evolutionApi",
+                # Node da COMUNIDADE, não do core: `n8n-nodes-evolution-api`.
+                # Com o prefixo errado o n8n mostra o node como desconhecido e o
+                # workflow não roda — conferido contra os workflows reais.
+                "type": "n8n-nodes-evolution-api.evolutionApi",
                 "typeVersion": 1,
                 "position": [240, 0],
                 "parameters": {
@@ -240,6 +247,11 @@ def _workflow_saida(cred_id: str) -> dict:
                     "messageText": "={{ $json.content ? JSON.parse($json.content).texto : $json.texto }}",
                     "options_message": {},
                 },
+                # A credencial do Evolution é COMPARTILHADA entre os clientes —
+                # quem separa um do outro é a `instanceName` acima, que vem da
+                # fila. É a mesma que os workflows atuais usam.
+                "credentials": {"evolutionApi": {"id": CRED_EVOLUTION_ID,
+                                                 "name": CRED_EVOLUTION_NOME}},
             },
         ],
         "connections": {
