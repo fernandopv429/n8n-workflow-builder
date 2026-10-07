@@ -178,8 +178,9 @@ mensagem se perde em silêncio**. Com fila ela espera.
    `A5 Trilho - Saida` (`agente.saida` → Evolution). Um só pra todos; o cliente
    vem da `instance` do Evolution. **Os dois estão DESATIVADOS** — ativar só
    com o worker de pé e testando com um número próprio.
-   Ainda fora: transcrição de áudio e debounce (etapa própria; hoje mensagem
-   sem texto é registrada e ignorada, não vira resposta vazia).
+   Transcrição de áudio: **feita em 07/10/2026**, no worker e não no trilho —
+   assim usa a chave do cliente e o custo cai no projeto dele. Ainda fora:
+   agrupar mensagens seguidas (debounce) e tratar imagem/documento.
 4. Um cliente real por vez. O workflow antigo continua existindo e desativado;
    rollback é reativá-lo e apontar o webhook de volta.
 5. Só depois que todos migrarem, aposentar o clonador.

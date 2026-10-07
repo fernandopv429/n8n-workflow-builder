@@ -38,6 +38,7 @@ import agente_chat  # noqa: E402  (reaproveita as travas já testadas)
 import config  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
+import evolution_client  # noqa: E402
 import n8n_edicao  # noqa: E402
 
 FILA_ENTRADA = "agente.entrada"
@@ -130,6 +131,50 @@ FERRAMENTA_HUMANO = {
         },
     },
 }
+
+
+# Transcrição: por que aqui e não no trilho do n8n.
+#
+# Transcrever custa, e o custo é atribuído pela chave que faz a chamada. No n8n
+# seria uma credencial compartilhada, e o gasto cairia num projeto só — o mesmo
+# problema que a separação por cliente veio resolver. Aqui usamos a chave DO
+# cliente, então a transcrição aparece no projeto dele.
+MODELO_TRANSCRICAO = "whisper-1"
+LIMITE_AUDIO_MB = 20          # acima disso a OpenAI recusa (limite de 25 MB)
+AUDIO_LONGO_DEMAIS = (
+    "Recebi seu áudio, mas ele é longo demais pra eu ouvir. "
+    "Pode me mandar por escrito, ou gravar um mais curto?"
+)
+FALHA_AUDIO = (
+    "Recebi seu áudio, mas não consegui ouvir agora. "
+    "Pode me mandar por escrito?"
+)
+
+
+def transcrever(cliente: dict, instancia: str, mensagem_id: str) -> str:
+    """Baixa o áudio da Evolution e devolve o texto. "" se não der.
+
+    O webhook entrega a mensagem de áudio SEM os bytes — só a estrutura. Por
+    isso o arquivo é buscado aqui, pela chave da mensagem.
+    """
+    import base64
+    import io as _io
+
+    bruto = evolution_client.obter_midia_base64(instancia, mensagem_id)
+    if not bruto:
+        return ""
+    audio = base64.b64decode(bruto)
+    if len(audio) > LIMITE_AUDIO_MB * 1024 * 1024:
+        raise ValueError(f"áudio com {len(audio) // (1024*1024)} MB")
+
+    arquivo = _io.BytesIO(audio)
+    # a OpenAI escolhe o decodificador pela extensão do nome; áudio de WhatsApp
+    # é ogg/opus, e sem o nome certo ela recusa um arquivo que consegue ler
+    arquivo.name = "audio.ogg"
+    resposta = _cliente_openai(cliente).audio.transcriptions.create(
+        model=MODELO_TRANSCRICAO, file=arquivo, language="pt"
+    )
+    return (resposta.text or "").strip()
 
 
 def _ferramentas_do_agente() -> list:
@@ -284,15 +329,46 @@ def processar(payload: dict) -> dict:
     id_whatsapp = str(payload["id_whatsapp"])
     mensagem_id = str(payload.get("mensagem_id") or "")
     texto = (payload.get("texto") or "").strip()
+    tipo = str(payload.get("tipo") or "texto")
 
     if mensagem_id and not db.registrar_mensagem_processada(mensagem_id, cliente_id):
         return None  # reentrega do WhatsApp ou da fila — já respondemos esta
+
+    # Áudio: o trilho manda a referência, os bytes vêm da Evolution e a
+    # transcrição acontece aqui, com a chave do cliente (ver `transcrever`).
+    aviso_audio = ""
+    if tipo == "audio" and not texto:
+        try:
+            texto = transcrever(cliente, payload.get("instancia") or "", mensagem_id)
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"[worker] áudio transcrito ({len(texto)} caracteres): {texto[:120]}",
+            )
+        except ValueError as e:
+            aviso_audio = AUDIO_LONGO_DEMAIS
+            db.registrar_log(cliente_id, "sistema", f"[worker] áudio recusado: {e}")
+        except Exception as e:  # noqa: BLE001 — Evolution/OpenAI fora do ar
+            aviso_audio = FALHA_AUDIO
+            db.registrar_log(cliente_id, "erro", f"[worker] falha ao transcrever áudio: {e}")
+        if not texto and not aviso_audio:
+            # transcrição vazia: áudio mudo, ruído, ou alguém mandou sem querer
+            aviso_audio = FALHA_AUDIO
 
     contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
     if contato["status"] == "HUMANO":
         # atendente assumiu — a IA calada é o comportamento certo aqui
         db.salvar_mensagem_agente(contato["id"], "user", texto)
         return None
+
+    # Paciente sem resposta é o pior desfecho: se a transcrição falhou, avisa e
+    # pede por escrito, em vez de ficar calado como antes.
+    if aviso_audio:
+        db.salvar_mensagem_agente(contato["id"], "user", "[áudio que não consegui ouvir]")
+        db.salvar_mensagem_agente(contato["id"], "assistant", aviso_audio)
+        return {"cliente_id": cliente_id,
+                "instancia": cliente.get("evolution_instancia") or instancia,
+                "id_whatsapp": id_whatsapp, "texto": aviso_audio,
+                "mensagem_id": mensagem_id}
 
     db.salvar_mensagem_agente(contato["id"], "user", texto)
     resposta = _responder(cliente, contato, texto)

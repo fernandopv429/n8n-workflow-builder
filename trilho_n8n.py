@@ -14,11 +14,13 @@ worker resolve instância → cliente no Postgres. Sem isso, voltaríamos a ter 
 workflow por cliente, que é a origem de quase todo bug deste projeto
 (ver ARQUITETURA-AGENTE.md).
 
-O que este trilho NÃO faz ainda, de propósito: transcrever áudio e agrupar
-mensagens (debounce). As duas coisas existem nos workflows atuais e vão ser
-portadas depois, numa etapa própria — misturar isso aqui tornaria impossível
-dizer se uma falha é do trilho ou da fila. Mensagem sem texto é ignorada com
-log, em vez de virar uma resposta vazia pro paciente.
+Áudio: o trilho encaminha a REFERÊNCIA, não os bytes — o webhook do Evolution
+não os traz. Quem busca o arquivo e transcreve é o worker, porque lá a chamada
+usa a chave do próprio cliente e o custo da transcrição cai no projeto dele.
+
+O que ainda falta, de propósito: agrupar mensagens seguidas (debounce) e tratar
+imagem/documento. Imagem hoje é registrada como não-tratada, em vez de virar
+resposta vazia pro paciente.
 """
 import argparse
 import json
@@ -83,8 +85,23 @@ const remoteJid = chave.remoteJid || '';
 // grupo (@g.us) e status não são atendimento individual
 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid.startsWith('status@')) return [];
 
-// Áudio e imagem ainda não são tratados (ver docstring de trilho_n8n.py).
-// Sinalizar é melhor que silenciar: o paciente mandou algo e ninguém viu.
+// Áudio vai pra fila SEM os bytes: o webhook não os traz, e quem busca na
+// Evolution e transcreve é o worker — lá a chamada usa a chave do cliente, e o
+// custo da transcrição aparece no projeto dele (ver worker_agente.transcrever).
+const ehAudio = !!(msg.audioMessage || msg.pttMessage);
+if (!texto && ehAudio) {
+  return [{ json: {
+    tipo: 'audio',
+    instancia: body.instance || dados.instance || '',
+    id_whatsapp: remoteJid.split('@')[0],
+    nome: dados.pushName || '',
+    texto: '',
+    mensagem_id: chave.id || '',
+  }}];
+}
+
+// Imagem, documento, figurinha: ainda não tratados. Sinalizar é melhor que
+// silenciar — o paciente mandou algo e ninguém viu.
 if (!texto) {
   return [{ json: {
     ignorado: true,
@@ -95,6 +112,7 @@ if (!texto) {
 }
 
 return [{ json: {
+  tipo: 'texto',
   instancia: body.instance || dados.instance || '',
   id_whatsapp: remoteJid.split('@')[0],
   nome: dados.pushName || '',

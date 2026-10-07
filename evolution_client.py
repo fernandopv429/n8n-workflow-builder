@@ -158,6 +158,20 @@ def obter_qr(nome: str) -> dict:
             "ja_conectada": bool(d.get("instance"))}
 
 
+def obter_midia_base64(instancia: str, mensagem_id: str) -> str:
+    """Baixa o conteúdo de uma mensagem de mídia (áudio, imagem) em base64.
+
+    O webhook do Evolution entrega a mensagem de áudio sem o áudio: vem a
+    estrutura, não os bytes. Quem quiser o arquivo tem que pedir por aqui,
+    usando a chave da mensagem.
+    """
+    d = _chamar("POST", f"/chat/getBase64FromMediaMessage/{urllib.parse.quote(instancia)}", {
+        "message": {"key": {"id": mensagem_id}},
+        "convertToMp4": False,
+    })
+    return (d or {}).get("base64") or ""
+
+
 def status(nome: str) -> str:
     try:
         d = _chamar("GET", f"/instance/connectionState/{urllib.parse.quote(nome)}")
