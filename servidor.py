@@ -90,6 +90,7 @@ ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
 # mais esquecido era o webhook — instância conectada sem webhook recebe
 # mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
 ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
+ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
 # Projeto da OpenAI por cliente, SEM depender de Kommo nem de clonagem. Antes
 # isso só acontecia dentro de PUT /credenciais, que exige Kommo e dispara o
 # clone inteiro — herança do desenho antigo. Quem só queria medir consumo
@@ -676,6 +677,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_ATIVO.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            ativo = bool(self._ler_corpo().get("ativo"))
+            db.definir_agente_ativo(cliente_id, ativo)
+            db.registrar_log(
+                cliente_id, "sistema",
+                "Agente LIGADO — volta a responder as mensagens que chegarem." if ativo
+                else "Agente DESLIGADO — mensagens continuam sendo guardadas, "
+                     "mas ninguém responde até religar.")
+            self._responder_json(200, {"ativo": ativo})
             return
 
         m = ROTA_CLIENTE_PROMPT.match(self.path)

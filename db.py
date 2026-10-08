@@ -77,6 +77,11 @@ def garantir_schema():
         # cliente. UNIQUE porque duas contas na mesma instância misturariam
         # conversa de pacientes de clientes diferentes.
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS evolution_instancia TEXT")
+        # Liga/desliga do atendimento. Serve pra pausar um cliente sem
+        # desconectar o WhatsApp nem apagar nada: desligado, o worker recebe a
+        # mensagem, GRAVA na conversa e não responde. A mensagem do paciente não
+        # se perde — fica lá pra alguém ler quando religar ou assumir.
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS agente_ativo BOOLEAN NOT NULL DEFAULT TRUE")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_instancia "
             "ON clientes (evolution_instancia) WHERE evolution_instancia IS NOT NULL"
@@ -545,6 +550,14 @@ def obter_cliente_por_instancia(instancia: str) -> dict:
         )
         linha = cur.fetchone()
         return _linha_para_cliente(cur, linha) if linha else {}
+
+
+def definir_agente_ativo(cliente_id: int, ativo: bool):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET agente_ativo = %s, atualizado_em = now() WHERE id = %s",
+            (bool(ativo), cliente_id),
+        )
 
 
 def definir_instancia_evolution(cliente_id: int, instancia: str):

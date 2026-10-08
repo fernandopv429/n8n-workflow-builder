@@ -355,6 +355,16 @@ def processar(payload: dict) -> dict:
             aviso_audio = FALHA_AUDIO
 
     contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
+
+    # Agente desligado no painel: grava e cala. Gravar importa — a pessoa
+    # escreveu, e a mensagem precisa estar lá quando alguém for ler ou religar.
+    if not cliente.get("agente_ativo", True):
+        db.salvar_mensagem_agente(contato["id"], "user", texto)
+        db.registrar_log(
+            cliente_id, "sistema",
+            f"[worker] agente desligado — mensagem de {id_whatsapp} guardada sem resposta.")
+        return None
+
     if contato["status"] == "HUMANO":
         # atendente assumiu — a IA calada é o comportamento certo aqui
         db.salvar_mensagem_agente(contato["id"], "user", texto)

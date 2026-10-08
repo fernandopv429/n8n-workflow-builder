@@ -4,9 +4,11 @@ node `Kommo MCP Server` com `path: "kommo-completo"`) — decisão registrada no
 README: nunca construir uma integração direta com o Kommo aqui, sempre
 proxiar por esse MCP já existente.
 
-Descoberta (18/09/2026, testado ao vivo): o node MCP não tem autenticação
-própria — `GET {N8N_URL}/mcp/kommo-completo/sse` responde 200 direto, sem
-token. Cada ferramenta do Kommo pede `kommo_domain`/`access_token` como
+Autenticação (07/10/2026): o node MCP ficou aberto até esta data — qualquer um
+que alcançasse a URL chamava as 17 ferramentas de CRM dos clientes. Agora ele
+exige `Authorization: Bearer` (`MCP_KOMMO_TOKEN`), e sem o header responde 403.
+
+Cada ferramenta do Kommo pede `kommo_domain`/`access_token` como
 PARÂMETRO da chamada (é multi-tenant por design) — nada fixo aqui, quem chama
 (agente_chat.py) passa o domínio/token do cliente atual em cada chamada.
 """
@@ -30,8 +32,15 @@ def _url_mcp() -> str:
     return carregar_env()["N8N_URL"].rstrip("/") + "/mcp/kommo-completo/sse"
 
 
+def _cabecalhos() -> dict:
+    """Bearer do MCP. Sem o token configurado manda sem header e o n8n devolve
+    403 — melhor falhar claro do que o chamador achar que o MCP caiu."""
+    token = carregar_env().get("MCP_KOMMO_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 async def _listar_ferramentas_async() -> list:
-    async with sse_client(_url_mcp()) as (read, write):
+    async with sse_client(_url_mcp(), headers=_cabecalhos()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             resultado = await session.list_tools()
@@ -46,7 +55,7 @@ def listar_ferramentas() -> list:
 
 
 async def _chamar_ferramenta_async(nome: str, argumentos: dict) -> str:
-    async with sse_client(_url_mcp()) as (read, write):
+    async with sse_client(_url_mcp(), headers=_cabecalhos()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             resultado = await session.call_tool(nome, argumentos)
