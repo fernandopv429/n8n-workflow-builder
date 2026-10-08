@@ -378,11 +378,6 @@
         <label for="forcar_novo">Criar um agente NOVO em vez de atualizar o que já existe</label>
       </div>
 
-      <div class="linha">
-        <input type="checkbox" id="dry_run" checked>
-        <label for="dry_run">Modo teste (dry-run) — só mostra o que seria feito, não cria nada no n8n</label>
-      </div>
-
       <button type="submit" class="principal" id="botao-salvar-credenciais">Salvar e clonar</button>
     </form>
 
@@ -1211,7 +1206,6 @@ async function prepararModalCredenciais() {
   const subtitulo = document.getElementById('modal-subtitulo');
   const botao = document.getElementById('botao-salvar-credenciais');
   const checkForcar = document.getElementById('forcar_novo');
-  const checkDry = document.getElementById('dry_run');
 
   checkForcar.checked = false;
 
@@ -1240,10 +1234,6 @@ async function prepararModalCredenciais() {
   linhaForcar.style.display = 'flex';
   subtitulo.textContent = 'Atualize as credenciais do agente existente, ou marque abaixo pra criar outro.';
   atualizarRotuloBotaoCredenciais();
-
-  // O dry-run não se aplica à atualização (ela não cria nada) — só volta a
-  // fazer sentido se a pessoa escolher criar um agente novo.
-  checkDry.closest('.linha').style.display = checkForcar.checked ? 'flex' : 'none';
 }
 
 function atualizarRotuloBotaoCredenciais() {
@@ -1257,9 +1247,8 @@ function atualizarRotuloBotaoCredenciais() {
   else botao.textContent = 'Atualizar credenciais';
 }
 
-document.getElementById('forcar_novo').addEventListener('change', (ev) => {
+document.getElementById('forcar_novo').addEventListener('change', () => {
   atualizarRotuloBotaoCredenciais();
-  document.getElementById('dry_run').closest('.linha').style.display = ev.target.checked ? 'flex' : 'none';
 });
 
 document.getElementById('botao-engrenagem').addEventListener('click', async () => {
@@ -1280,9 +1269,7 @@ function renderizarResultadoCredenciais(resultado, ok) {
   }
 
   let mensagem;
-  if (resultado.dry_run) {
-    mensagem = 'Simulação concluída — nada foi criado no n8n. Detalhes nos logs.';
-  } else if (resultado.atualizado) {
+  if (resultado.atualizado) {
     mensagem = resultado.campos_alterados && resultado.campos_alterados.length
       ? `Credenciais atualizadas no agente existente (${resultado.campos_alterados.join(', ')}).`
       : 'Nada a atualizar — as credenciais enviadas já são as que estão no agente.';
@@ -1303,7 +1290,6 @@ document.getElementById('form-credenciais').addEventListener('submit', async (ev
     kommo_subdominio: document.getElementById('kommo_subdominio').value,
     kommo_token: document.getElementById('kommo_token').value,
     openai_api_key: document.getElementById('openai_api_key').value,
-    dry_run: document.getElementById('dry_run').checked,
     forcar_novo: document.getElementById('forcar_novo').checked,
   };
 

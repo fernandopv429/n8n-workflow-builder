@@ -753,7 +753,12 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(400, {"error": "JSON inválido"})
             return
 
-        dry_run = bool(corpo.get("dry_run", True))
+        # Padrão FALSE desde 07/10/2026, quando a caixa "Modo teste" saiu da
+        # tela a pedido do Fernando. Era True porque a tela sempre mandava o
+        # valor; sem a caixa, manter True faria toda clonagem virar simulação e
+        # nada ser criado — com o painel dizendo "concluído". O parâmetro
+        # continua aceito pra quem chamar a API direto e quiser simular.
+        dry_run = bool(corpo.get("dry_run", False))
         forcar_novo = bool(corpo.get("forcar_novo", False))
 
         # Conexão com o Kommo é testada ANTES de gravar qualquer coisa: com
