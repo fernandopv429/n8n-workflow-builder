@@ -1042,10 +1042,11 @@ document.getElementById('botao-voltar-geral').addEventListener('click', mostrarD
 async function carregarFerramentas() {
   const caixa = document.getElementById('ferramentas-conteudo');
   caixa.innerHTML = 'carregando…';
-  let catalogo = [], ligados = [];
+  let catalogo = [], ligados = [], nomeCliente = '';
   try {
     catalogo = (await (await fetch('/mcps')).json()).mcps || [];
     ligados = (await (await fetch(`/clientes/${clienteAtualId}/mcps`)).json()).mcps || [];
+    nomeCliente = (await (await fetch(`/clientes/${clienteAtualId}`)).json()).cliente_nome || '';
   } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
 
   const porPath = Object.fromEntries(ligados.map(l => [l.path, l]));
@@ -1055,14 +1056,21 @@ async function carregarFerramentas() {
     const l = porPath[c.path];
     const marcado = l ? 'checked' : '';
     const atend = l && l.no_atendimento ? 'checked' : '';
-    return `<tr>
+    // De outro cliente: bloqueia. A base de conhecimento da Performance Run no
+    // agente da Fabifisio seria vazamento de dado entre clientes, e o nome do
+    // MCP não avisa de quem ele é.
+    const outros = (c.em_uso_por || []).filter(n => n !== nomeCliente);
+    const bloqueado = !l && outros.length;
+    return `<tr${bloqueado ? ' style="opacity:.45"' : ''}>
       <td><input type="checkbox" class="mcp-liga" data-path="${escaparHtml(c.path)}"
-                 data-nome="${escaparHtml(c.nome)}" ${marcado}></td>
+                 data-nome="${escaparHtml(c.nome)}" ${marcado}
+                 ${bloqueado ? 'disabled' : ''}></td>
       <td>${escaparHtml(c.nome)}<br><small class="hint">${escaparHtml(c.path)}</small></td>
       <td style="text-align:center">
         <input type="checkbox" class="mcp-atend" data-path="${escaparHtml(c.path)}" ${atend}
                ${l ? '' : 'disabled'}></td>
-      <td>${c.ativo ? '' : '<span class="opcional">inativo no n8n</span>'}
+      <td>${bloqueado ? `<span class="opcional">de ${escaparHtml(outros.join(', '))}</span>` : ''}
+          ${c.ativo ? '' : '<span class="opcional">inativo no n8n</span>'}
           ${c.autenticado ? '' : '<span class="opcional">sem autenticação</span>'}</td>
     </tr>`;
   }).join('');
@@ -1075,8 +1083,43 @@ async function carregarFerramentas() {
       <tbody>${linhas || '<tr><td colspan="4">nenhum MCP encontrado no n8n.</td></tr>'}</tbody>
     </table>
     <small class="hint">"No atendimento" libera a ferramenta para o agente que fala com o
-      paciente. Sem marcar, ela fica só no chat deste painel — que é operado por você.</small>
+      paciente. Sem marcar, ela fica só no chat deste painel — que é operado por você.
+      Ferramenta marcada como "de outro cliente" fica bloqueada: ligá-la aqui daria a
+      este agente acesso aos dados daquele.</small>
+
+    <h3 style="margin-top:22px">Adicionar à mão</h3>
+    <p class="hint">Para MCP que não está no n8n da A5, ou que acabou de ser criado e
+      ainda não apareceu na lista. Aceita o caminho (<code>meu-mcp</code>) ou a URL
+      completa.</p>
+    <div class="linha" style="gap:8px; flex-wrap:wrap">
+      <input type="text" id="novo-apelido" placeholder="apelido (ex: agenda)" style="max-width:150px">
+      <input type="text" id="novo-path" placeholder="caminho ou URL" style="max-width:240px">
+      <input type="password" id="novo-token" placeholder="token (se tiver)" style="max-width:150px">
+      <label class="opcional"><input type="checkbox" id="novo-atend"> no atendimento</label>
+      <label class="opcional"><input type="checkbox" id="novo-compart"> serve a todos</label>
+      <button type="button" class="handoff-botao" id="btn-add-mcp">Testar e adicionar</button>
+    </div>
     <div id="ferramentas-aviso" class="opcional"></div>`;
+
+  document.getElementById('btn-add-mcp').addEventListener('click', async (ev) => {
+    const b = ev.target, aviso = document.getElementById('ferramentas-aviso');
+    b.disabled = true; aviso.textContent = 'testando o MCP…';
+    const resp = await fetch(`/clientes/${clienteAtualId}/mcps`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apelido: document.getElementById('novo-apelido').value,
+        path: document.getElementById('novo-path').value,
+        token: document.getElementById('novo-token').value,
+        no_atendimento: document.getElementById('novo-atend').checked,
+        compartilhada: document.getElementById('novo-compart').checked,
+      }),
+    });
+    const r = await resp.json();
+    b.disabled = false;
+    if (!resp.ok) { aviso.textContent = `erro: ${r.error}`; return; }
+    carregarLogs();
+    carregarFerramentas();
+  });
 
   async function salvar(path, nome, ligar, atendimento) {
     const aviso = document.getElementById('ferramentas-aviso');

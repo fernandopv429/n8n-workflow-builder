@@ -60,7 +60,14 @@ class McpIndisponivel(RuntimeError):
 # uma requisição a mais só quando o MCP é antigo.
 def url_do_path(path: str, sse: bool = False) -> str:
     """Guardamos o path, não a URL inteira: se o n8n mudar de domínio, muda só
-    a variável de ambiente e nenhum registro de cliente precisa ser editado."""
+    a variável de ambiente e nenhum registro de cliente precisa ser editado.
+
+    Mas aceita URL completa também — MCP não precisa morar no nosso n8n pra
+    servir de ferramenta, e exigir isso fecharia a porta pra MCP de terceiro.
+    """
+    if path.startswith(("http://", "https://")):
+        u = path.rstrip("/")
+        return u if not sse or u.endswith("/sse") else f"{u}/sse"
     base = carregar_env()["N8N_URL"].rstrip("/")
     caminho = f"{base}/mcp/{path.strip('/')}"
     return f"{caminho}/sse" if sse else caminho

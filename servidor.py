@@ -306,9 +306,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if ROTA_MCPS_CATALOGO.match(self.path):
             try:
-                self._responder_json(200, {"mcps": mcp_cliente.catalogo()})
+                catalogo = mcp_cliente.catalogo()
             except Exception as e:  # noqa: BLE001 — n8n fora do ar é informação, não erro do painel
                 self._responder_json(200, {"mcps": [], "erro": str(e)[:200]})
+                return
+            # Quem já usa cada MCP: a tela precisa disso pra não deixar ligar a
+            # base de conhecimento de um cliente no agente de outro. O nome do
+            # MCP não diz de quem ele é, e um clique vazaria dado entre clientes.
+            usos = db.quem_usa_cada_mcp()
+            for m in catalogo:
+                m["em_uso_por"] = usos.get(m["path"], [])
+            self._responder_json(200, {"mcps": catalogo})
             return
 
         m = ROTA_CLIENTE_MCPS.match(self.path)
@@ -445,6 +453,20 @@ class Handler(BaseHTTPRequestHandler):
             if not teste["ok"]:
                 self._responder_json(400, {"error": f"o MCP não respondeu: {teste['motivo']}"})
                 return
+
+            # Trava server-side, não só na tela: ligar um MCP que já é de outro
+            # cliente é vazamento de dado entre clientes, e a tela pode ser
+            # contornada. `compartilhada` é a saída explícita pra MCP que
+            # realmente serve todos (o do Kommo é multi-inquilino por desenho).
+            if not bool(corpo.get("compartilhada")):
+                donos = [n for n in db.quem_usa_cada_mcp().get(path, [])
+                         if n != db.obter_cliente(cliente_id)["cliente_nome"]]
+                if donos:
+                    self._responder_json(409, {"error":
+                        f"esta ferramenta já é usada por {', '.join(donos)}. Se ela serve "
+                        "a todos os clientes, marque 'serve a todos' — senão o agente "
+                        "deste cliente passaria a ler dados do outro."})
+                    return
 
             db.salvar_mcp_do_cliente(
                 cliente_id, apelido, path,

@@ -720,6 +720,24 @@ def listar_mcps_do_cliente(cliente_id: int, so_ativos: bool = False,
     return saida
 
 
+def quem_usa_cada_mcp() -> dict:
+    """{path: [nome do cliente, ...]}.
+
+    Serve pra impedir o pior erro possível nesta tela: ligar a base de
+    conhecimento de um cliente no agente de outro. Um clique vazaria dado entre
+    clientes, e nada no nome do MCP avisa de quem ele é.
+    """
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT m.path, c.cliente_nome FROM cliente_mcps m "
+            "JOIN clientes c ON c.id = m.cliente_id"
+        )
+        saida = {}
+        for path, nome in cur.fetchall():
+            saida.setdefault(path, []).append(nome)
+    return saida
+
+
 def salvar_mcp_do_cliente(cliente_id: int, apelido: str, path: str, token: str = "",
                           ativo: bool = True, no_atendimento: bool = False):
     """Cria ou atualiza. Token vazio não apaga o que já existe — a tela reenvia
