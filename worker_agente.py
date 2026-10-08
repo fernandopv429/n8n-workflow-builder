@@ -44,6 +44,24 @@ import n8n_edicao  # noqa: E402
 FILA_ENTRADA = "agente.entrada"
 FILA_SAIDA = "agente.saida"
 MAX_RODADAS = 8
+
+# Comando de reset pelo próprio WhatsApp, como nos workflows antigos (nodes
+# `MSG Reset`/`Deleta Memoria`/`DELETE HISTORY`). Útil em teste e quando a
+# conversa trava num mal-entendido — o paciente mesmo recomeça, sem precisar
+# que alguém abra o painel.
+#
+# Lista fechada e comparação exata (sem acento, sem maiúscula): "reset" solto
+# é comando; "preciso resetar minha senha" é conversa. Comparar por "contém"
+# transformaria frase legítima em apagamento de histórico.
+COMANDOS_RESET = {"reset", "resetar", "/reset", "#reset", "reiniciar"}
+RESPOSTA_RESET = "Reset concluído! Vamos do começo."
+
+
+def _eh_comando_reset(texto: str) -> bool:
+    import unicodedata
+    limpo = unicodedata.normalize("NFKD", (texto or "").strip().lower())
+    limpo = "".join(c for c in limpo if not unicodedata.combining(c))
+    return limpo in COMANDOS_RESET
 MAX_HISTORICO = 20
 
 # Preâmbulo que separa instrução de dado. O conteúdo da conversa vem de quem
@@ -355,6 +373,20 @@ def processar(payload: dict) -> dict:
             aviso_audio = FALHA_AUDIO
 
     contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
+
+    # Reset vem ANTES de tudo: funciona mesmo com o agente desligado ou com o
+    # contato em atendimento humano, que é justamente quando alguém quer
+    # recomeçar. Não gasta chamada de modelo.
+    if _eh_comando_reset(texto):
+        contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
+        apagadas = db.limpar_conversa(contato["id"])
+        db.registrar_log(
+            cliente_id, "sistema",
+            f"[worker] {id_whatsapp} pediu reset — {apagadas} mensagens apagadas.")
+        return {"cliente_id": cliente_id,
+                "instancia": cliente.get("evolution_instancia") or instancia,
+                "id_whatsapp": id_whatsapp, "texto": RESPOSTA_RESET,
+                "mensagem_id": mensagem_id}
 
     # Agente desligado no painel: grava e cala. Gravar importa — a pessoa
     # escreveu, e a mensagem precisa estar lá quando alguém for ler ou religar.

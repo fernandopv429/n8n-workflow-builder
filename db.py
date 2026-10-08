@@ -262,6 +262,24 @@ def obter_contato(contato_id: int) -> dict | None:
     return d
 
 
+def limpar_conversa(contato_id: int) -> int:
+    """Apaga o histórico de um contato e devolve quantas mensagens saíram.
+
+    O contato CONTINUA existindo, com o mesmo id e status — some só a memória.
+    É o equivalente ao `Deleta Memoria`/`DELETE HISTORY` dos workflows antigos:
+    serve pra testar do zero e pra quando a conversa azeda e é melhor recomeçar
+    do que o agente ficar preso num mal-entendido.
+
+    As mensagens já processadas NÃO são esquecidas: a trava de idempotência
+    continua valendo, senão uma reentrega do WhatsApp seria respondida de novo.
+    """
+    with _conectar() as conn:
+        n = conn.execute(
+            "DELETE FROM agente_mensagens WHERE contato_id = %s", (contato_id,)
+        ).rowcount
+    return n or 0
+
+
 def definir_status_contato(contato_id: int, status: str):
     """'HUMANO' tira o contato do atendimento automático — é o handoff. O worker
     confere isso ANTES de responder, senão a IA fala por cima do atendente."""

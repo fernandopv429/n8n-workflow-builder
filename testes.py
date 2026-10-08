@@ -596,6 +596,19 @@ def teste_erro_da_openai_carrega_o_corpo():
     assert "403" in str(e) and "insufficient permissions" in str(e), str(e)
 
 
+def teste_reset_so_dispara_em_comando_exato():
+    """"reset" solto é comando; "preciso resetar minha senha" é conversa.
+
+    Comparar por "contém" transformaria frase legítima em apagamento de
+    histórico — e o paciente perderia o contexto sem pedir."""
+    import worker_agente as w
+    for comando in ("reset", "Reset", "RESET", "  resetar  ", "/reset", "#reset", "reiniciar"):
+        assert w._eh_comando_reset(comando), f"deveria ser comando: {comando!r}"
+    for conversa in ("preciso resetar minha senha", "como faco reset da conta",
+                     "resetou?", "reset do aparelho", "", "oi"):
+        assert not w._eh_comando_reset(conversa), f"NÃO deveria ser comando: {conversa!r}"
+
+
 TESTES = [
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
@@ -631,6 +644,7 @@ TESTES = [
     teste_cria_projeto_e_chave_do_cliente,
     teste_nao_deixa_projeto_orfao_se_a_chave_nao_vier,
     teste_erro_da_openai_carrega_o_corpo,
+    teste_reset_so_dispara_em_comando_exato,
 ]
 
 

@@ -83,6 +83,8 @@ ROTA_CLIENTE_IMAGEM = re.compile(r"^/clientes/(\d+)/imagem$")
 ROTA_CLIENTE_CONTATOS = re.compile(r"^/clientes/(\d+)/contatos$")
 ROTA_CONTATO_MENSAGENS = re.compile(r"^/contatos/(\d+)/mensagens$")
 ROTA_CONTATO_STATUS = re.compile(r"^/contatos/(\d+)/status$")
+# Zera a memória de uma conversa sem apagar o contato (ver db.limpar_conversa).
+ROTA_CONTATO_RESET = re.compile(r"^/contatos/(\d+)/reset$")
 ROTA_FILA = re.compile(r"^/fila$")
 ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
 ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
@@ -677,6 +679,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CONTATO_RESET.match(self.path)
+        if m:
+            contato_id = int(m.group(1))
+            contato = db.obter_contato(contato_id)
+            if contato is None:
+                self._responder_json(404, {"error": "contato não encontrado"})
+                return
+            apagadas = db.limpar_conversa(contato_id)
+            db.registrar_log(
+                contato["cliente_id"], "sistema",
+                f"Conversa com {contato['id_whatsapp']} zerada ({apagadas} mensagens "
+                "apagadas). O agente volta a tratar como contato novo.")
+            self._responder_json(200, {"apagadas": apagadas})
             return
 
         m = ROTA_CLIENTE_ATIVO.match(self.path)

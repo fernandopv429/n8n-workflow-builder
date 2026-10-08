@@ -167,6 +167,7 @@
   .contato-conversa .msg { margin-bottom: 6px; }
   /* Aviso de fila: só aparece quando há algo errado — banner permanente vira
      paisagem e ninguém mais lê. */
+  .acoes-conversa { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .handoff-botao {
     margin-top: 10px; padding: 7px 12px; border-radius: 6px; cursor: pointer;
     background: none; border: 1px solid var(--border); color: var(--text); font-size: 12px;
@@ -1014,14 +1015,40 @@ async function abrirConversa(contatoId) {
   const assumir = contato.status !== 'HUMANO';
   caixa.innerHTML =
     mensagens.map(m => `<div class="msg ${m.role}">${escaparHtml(m.conteudo)}</div>`).join('') +
-    `<button type="button" class="handoff-botao" id="handoff-${contatoId}">` +
-    (assumir ? 'Assumir — o agente para de responder' : 'Devolver para a IA') + '</button>';
+    `<div class="acoes-conversa">
+       <button type="button" class="handoff-botao" id="handoff-${contatoId}">` +
+    (assumir ? 'Assumir — o agente para de responder' : 'Devolver para a IA') +
+    `</button>
+       <button type="button" class="handoff-botao" id="reset-${contatoId}">Zerar conversa</button>
+     </div>`;
 
   document.getElementById(`handoff-${contatoId}`).addEventListener('click', async () => {
     await fetch(`/contatos/${contatoId}/status`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: assumir ? 'HUMANO' : 'IA' }),
     });
+    await carregarAtendimento();
+    await carregarLogs();
+  });
+
+  // Confirmação porque não dá pra desfazer — e o histórico é o que o agente usa
+  // pra não repetir pergunta que o paciente já respondeu.
+  document.getElementById(`reset-${contatoId}`).addEventListener('click', async (ev) => {
+    const b = ev.target;
+    if (b.dataset.confirmando !== 'sim') {
+      b.dataset.confirmando = 'sim';
+      b.textContent = 'Apagar o histórico? Clique de novo';
+      setTimeout(() => {
+        if (b.dataset.confirmando === 'sim') {
+          b.dataset.confirmando = ''; b.textContent = 'Zerar conversa';
+        }
+      }, 5000);
+      return;
+    }
+    b.disabled = true;
+    const r = await (await fetch(`/contatos/${contatoId}/reset`, { method: 'POST' })).json();
+    b.textContent = `${r.apagadas} mensagens apagadas`;
+    caixa.style.display = 'none';
     await carregarAtendimento();
     await carregarLogs();
   });
