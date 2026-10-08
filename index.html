@@ -291,6 +291,7 @@
       <button type="button" class="aba" data-aba="atendimento">
         Atendimento <span id="atendimento-resumo" class="opcional"></span></button>
       <button type="button" class="aba" data-aba="whatsapp">WhatsApp</button>
+      <button type="button" class="aba" data-aba="ferramentas">Ferramentas</button>
       <button type="button" class="aba" data-aba="consumo">Consumo</button>
       <button type="button" class="aba" data-aba="logs">Logs</button>
     </nav>
@@ -309,6 +310,10 @@
 
   <div class="painel-aba" id="painel-whatsapp" style="display:none">
     <div id="whatsapp-conteudo"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-ferramentas" style="display:none">
+    <div id="ferramentas-conteudo"></div>
   </div>
 
   <div class="painel-aba" id="painel-consumo" style="display:none">
@@ -801,6 +806,7 @@ function trocarAba(nome) {
   if (nome === 'atendimento') carregarAtendimento();
   if (nome === 'consumo') carregarConsumo();
   if (nome === 'whatsapp') carregarWhatsapp();
+  if (nome === 'ferramentas') carregarFerramentas();
 }
 
 document.getElementById('abas').addEventListener('click', ev => {
@@ -919,6 +925,82 @@ async function carregarWhatsapp() {
     mostrarQr(r);
     b.textContent = 'Gerar outro QR';
   });
+}
+
+async function carregarFerramentas() {
+  const caixa = document.getElementById('ferramentas-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let catalogo = [], ligados = [];
+  try {
+    catalogo = (await (await fetch('/mcps')).json()).mcps || [];
+    ligados = (await (await fetch(`/clientes/${clienteAtualId}/mcps`)).json()).mcps || [];
+  } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+
+  const porPath = Object.fromEntries(ligados.map(l => [l.path, l]));
+  // O catálogo vem do próprio n8n: MCP novo aparece aqui sozinho, sem ninguém
+  // digitar caminho — e caminho digitado é caminho errado.
+  const linhas = catalogo.map(c => {
+    const l = porPath[c.path];
+    const marcado = l ? 'checked' : '';
+    const atend = l && l.no_atendimento ? 'checked' : '';
+    return `<tr>
+      <td><input type="checkbox" class="mcp-liga" data-path="${escaparHtml(c.path)}"
+                 data-nome="${escaparHtml(c.nome)}" ${marcado}></td>
+      <td>${escaparHtml(c.nome)}<br><small class="hint">${escaparHtml(c.path)}</small></td>
+      <td style="text-align:center">
+        <input type="checkbox" class="mcp-atend" data-path="${escaparHtml(c.path)}" ${atend}
+               ${l ? '' : 'disabled'}></td>
+      <td>${c.ativo ? '' : '<span class="opcional">inativo no n8n</span>'}
+          ${c.autenticado ? '' : '<span class="opcional">sem autenticação</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  caixa.innerHTML = `
+    <p class="hint">Ferramentas vêm dos MCPs do n8n. Para criar uma nova — Google Sheets,
+      HTTP, o que for — monte o MCP lá e ele aparece nesta lista sozinho.</p>
+    <table class="tabela-consumo">
+      <thead><tr><th>usar</th><th>ferramenta</th><th>no atendimento</th><th></th></tr></thead>
+      <tbody>${linhas || '<tr><td colspan="4">nenhum MCP encontrado no n8n.</td></tr>'}</tbody>
+    </table>
+    <small class="hint">"No atendimento" libera a ferramenta para o agente que fala com o
+      paciente. Sem marcar, ela fica só no chat deste painel — que é operado por você.</small>
+    <div id="ferramentas-aviso" class="opcional"></div>`;
+
+  async function salvar(path, nome, ligar, atendimento) {
+    const aviso = document.getElementById('ferramentas-aviso');
+    aviso.textContent = 'salvando…';
+    if (!ligar) {
+      await fetch(`/clientes/${clienteAtualId}/mcps`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apelido: (porPath[path] || {}).apelido }),
+      });
+      aviso.textContent = 'desligada.';
+    } else {
+      const apelido = (porPath[path] || {}).apelido ||
+        path.replace(/[^a-z0-9]+/gi, '_').slice(0, 20);
+      const resp = await fetch(`/clientes/${clienteAtualId}/mcps`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apelido, path, no_atendimento: atendimento }),
+      });
+      const r = await resp.json();
+      aviso.textContent = resp.ok
+        ? `${nome}: ${r.quantidade} ferramentas disponíveis.`
+        : `erro: ${r.error}`;
+    }
+    carregarLogs();
+    carregarFerramentas();
+  }
+
+  caixa.querySelectorAll('.mcp-liga').forEach(c => c.addEventListener('change', ev => {
+    const p = ev.target.dataset.path;
+    salvar(p, ev.target.dataset.nome, ev.target.checked,
+           (caixa.querySelector(`.mcp-atend[data-path="${p}"]`) || {}).checked || false);
+  }));
+  caixa.querySelectorAll('.mcp-atend').forEach(c => c.addEventListener('change', ev => {
+    const p = ev.target.dataset.path;
+    const nome = (caixa.querySelector(`.mcp-liga[data-path="${p}"]`) || {}).dataset.nome;
+    salvar(p, nome, true, ev.target.checked);
+  }));
 }
 
 async function carregarConsumo() {

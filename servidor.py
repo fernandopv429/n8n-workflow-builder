@@ -45,6 +45,7 @@ sys.path.insert(0, str(RAIZ))
 import agente_chat  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
+import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import monitor_fila  # noqa: E402
 import n8n_edicao  # noqa: E402
@@ -93,6 +94,10 @@ ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
 # mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
 ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
 ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
+# Ferramentas por cliente: integração nova vira MCP novo no n8n, e aqui se
+# escolhe quem usa o quê. O catálogo é descoberto do próprio n8n.
+ROTA_MCPS_CATALOGO = re.compile(r"^/mcps$")
+ROTA_CLIENTE_MCPS = re.compile(r"^/clientes/(\d+)/mcps$")
 # Projeto da OpenAI por cliente, SEM depender de Kommo nem de clonagem. Antes
 # isso só acontecia dentro de PUT /credenciais, que exige Kommo e dispara o
 # clone inteiro — herança do desenho antigo. Quem só queria medir consumo
@@ -279,6 +284,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._responder_json(200, {"instancia": nome, "status": f"erro: {e}"})
             return
 
+        if ROTA_MCPS_CATALOGO.match(self.path):
+            try:
+                self._responder_json(200, {"mcps": mcp_cliente.catalogo()})
+            except Exception as e:  # noqa: BLE001 — n8n fora do ar é informação, não erro do painel
+                self._responder_json(200, {"mcps": [], "erro": str(e)[:200]})
+            return
+
+        m = ROTA_CLIENTE_MCPS.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            ligados = db.listar_mcps_do_cliente(cliente_id)
+            # o token não volta pra tela: ela não precisa dele pra nada
+            for x in ligados:
+                x["tem_token"] = bool(x.pop("token", ""))
+            self._responder_json(200, {"mcps": ligados})
+            return
+
         m = ROTA_CLIENTE_CONSUMO.match(self.path)
         if m:
             cliente = db.obter_cliente(int(m.group(1)))
@@ -340,6 +362,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_MCPS.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            corpo = self._ler_corpo()
+            apelido = str(corpo.get("apelido", "")).strip()
+            path = str(corpo.get("path", "")).strip()
+            if not apelido or not path:
+                self._responder_json(400, {"error": "apelido e path são obrigatórios"})
+                return
+
+            # Testa ANTES de gravar: MCP que não responde cadastrado vira
+            # ferramenta quebrada na mão do agente, e a falha só aparece no meio
+            # de uma conversa com paciente.
+            teste = mcp_cliente.testar(path, str(corpo.get("token", "")).strip())
+            if not teste["ok"]:
+                self._responder_json(400, {"error": f"o MCP não respondeu: {teste['motivo']}"})
+                return
+
+            db.salvar_mcp_do_cliente(
+                cliente_id, apelido, path,
+                token=str(corpo.get("token", "")).strip(),
+                ativo=bool(corpo.get("ativo", True)),
+                no_atendimento=bool(corpo.get("no_atendimento", False)))
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Ferramenta '{apelido}' ({path}) ligada — {teste['quantidade']} "
+                f"ferramentas. No atendimento ao paciente: "
+                f"{'sim' if corpo.get('no_atendimento') else 'não, só no chat do painel'}.")
+            self._responder_json(200, {"salvo": True, **teste})
             return
 
         m = ROTA_CLIENTE_OPENAI.match(self.path)
@@ -614,6 +670,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_MCPS.match(self.path)
+        if m:
+            apelido = str(self._ler_corpo().get("apelido", "")).strip()
+            db.remover_mcp_do_cliente(int(m.group(1)), apelido)
+            db.registrar_log(int(m.group(1)), "sistema",
+                             f"Ferramenta '{apelido}' desligada deste cliente.")
+            self._responder_json(200, {"removido": True})
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)

@@ -37,6 +37,7 @@ import pika  # noqa: E402
 import agente_chat  # noqa: E402  (reaproveita as travas já testadas)
 import config  # noqa: E402
 import db  # noqa: E402
+import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import evolution_client  # noqa: E402
 import n8n_edicao  # noqa: E402
@@ -201,16 +202,39 @@ def transcrever(cliente: dict, instancia: str, mensagem_id: str) -> str:
     return (resposta.text or "").strip()
 
 
-def _ferramentas_do_agente() -> list:
-    """Só o que a lista permite, mais o handoff.
+def _ferramentas_dos_mcps(cliente: dict) -> tuple:
+    """Ferramentas dos MCPs que ESTE cliente tem ligados pro atendimento.
 
-    Com FERRAMENTAS_PERMITIDAS vazia, nem chega a consultar o MCP do Kommo — o
-    que de quebra tira o worker da dependência de o MCP estar de pé pra atender.
+    Devolve (lista_pro_modelo, mapa_nome -> mcp). Só entram os marcados como
+    `no_atendimento`: o chat do painel é operado por gente da A5, aqui o pedido
+    vem de quem escreveu no WhatsApp.
+
+    Um MCP fora do ar NÃO derruba o atendimento — as ferramentas dele somem da
+    lista e o log registra. Paciente sem resposta é pior que agente com menos
+    recursos.
     """
-    if not FERRAMENTAS_PERMITIDAS:
-        return [FERRAMENTA_HUMANO]
-    todas = agente_chat._preparar_ferramentas_kommo()
-    return [f for f in todas if f["function"]["name"] in FERRAMENTAS_PERMITIDAS] + [FERRAMENTA_HUMANO]
+    ferramentas, mapa = [], {}
+    for m in db.listar_mcps_do_cliente(cliente["id"], so_atendimento=True):
+        try:
+            fs = mcp_cliente.listar_ferramentas(m["path"], m["token"], m["apelido"])
+        except mcp_cliente.McpIndisponivel as e:
+            db.registrar_log(cliente["id"], "erro",
+                             f"[worker] ferramenta '{m['apelido']}' indisponível: {e}")
+            continue
+        for f in fs:
+            mapa[f["name"]] = m
+            ferramentas.append({"type": "function", "function": {
+                "name": f["name"],
+                "description": f.get("description") or "",
+                "parameters": f.get("input_schema") or {"type": "object", "properties": {}},
+            }})
+    return ferramentas, mapa
+
+
+def _ferramentas_do_agente(cliente: dict) -> tuple:
+    """Handoff + o que os MCPs do cliente oferecem. Devolve (lista, mapa)."""
+    ferramentas, mapa = _ferramentas_dos_mcps(cliente)
+    return ferramentas + [FERRAMENTA_HUMANO], mapa
 
 
 def _system_prompt(cliente: dict) -> str:
@@ -265,7 +289,7 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     # Só busca credencial do Kommo se alguma ferramenta dele estiver liberada:
     # senão uma falha no n8n/MCP derrubaria um atendimento que não precisa deles.
     credenciais = n8n_edicao.credenciais_kommo(cliente) if FERRAMENTAS_PERMITIDAS else {}
-    ferramentas = _ferramentas_do_agente()
+    ferramentas, mapa_mcp = _ferramentas_do_agente(cliente)
     openai = _cliente_openai(cliente)
 
     for _ in range(MAX_RODADAS):
@@ -283,7 +307,8 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
                 args = json.loads(chamada.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            resultado = _executar(nome, args, credenciais, cliente["id"], contato["id"])
+            resultado = _executar(nome, args, credenciais, cliente["id"],
+                                  contato["id"], mapa_mcp)
             mensagens.append({
                 "role": "tool", "tool_call_id": chamada.id, "content": resultado[:4000]
             })
@@ -292,7 +317,7 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
 
 
 def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
-              contato_id: int = 0) -> str:
+              contato_id: int = 0, mapa_mcp: dict | None = None) -> str:
     """Mesmas travas do painel: elas valem mais aqui, onde o pedido veio de fora."""
     try:
         if nome == "chamar_humano":
@@ -304,6 +329,20 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
             )
             return ("ok: um atendente foi chamado e assume a partir de agora. "
                     "Avise o paciente em uma frase e não responda mais nada.")
+
+        # Ferramenta vinda de um MCP ligado a este cliente.
+        m = (mapa_mcp or {}).get(nome)
+        if m:
+            args = agente_chat._normalizar_args_kommo(args)
+            # Kommo é multi-inquilino: pede a credencial como parâmetro. Os
+            # outros MCPs já têm a credencial dentro deles.
+            extra = credenciais if m["path"] == "kommo-completo" else None
+            try:
+                return mcp_cliente.chamar_ferramenta(
+                    m["path"], nome, args, token=m["token"],
+                    apelido=m["apelido"], credenciais=extra)
+            except mcp_cliente.McpIndisponivel as e:
+                return f"erro: {e}"
 
         # Defesa em profundidade: mesmo que uma ferramenta fora da lista chegue
         # aqui (bug nosso, ou mudança no MCP), ela não executa.

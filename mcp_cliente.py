@@ -152,6 +152,38 @@ def chamar_ferramenta(path: str, nome: str, argumentos: dict, token: str = "",
         raise McpIndisponivel(f"MCP '{path}', ferramenta '{nome}': {str(e)[:160]}") from None
 
 
+def catalogo() -> list:
+    """Todos os MCPs que existem no n8n, descobertos pelos próprios workflows.
+
+    Evita digitar caminho na tela — e digitar caminho erra. O n8n é a fonte da
+    verdade: MCP novo aparece aqui sozinho, MCP renomeado aparece com o nome
+    novo.
+
+    Também devolve `autenticado`, porque hoje só o do Kommo exige token: os
+    outros respondem pra qualquer um que saiba a URL, e isso precisa ficar
+    visível na hora de escolher.
+    """
+    from n8n_client import N8nClient
+
+    cliente = N8nClient()
+    achados = []
+    for w in cliente._request("GET", "/workflows?limit=250").get("data", []):
+        try:
+            wf = cliente.get_workflow(w["id"])
+        except Exception:  # noqa: BLE001 — um workflow ilegível não derruba a lista
+            continue
+        for n in wf.get("nodes", []):
+            if "mcpTrigger" not in n.get("type", ""):
+                continue
+            achados.append({
+                "nome": w["name"],
+                "path": (n.get("parameters") or {}).get("path", ""),
+                "ativo": bool(wf.get("active")),
+                "autenticado": bool((n.get("parameters") or {}).get("authentication")),
+            })
+    return sorted(achados, key=lambda x: x["nome"])
+
+
 def testar(path: str, token: str = "") -> dict:
     """Diagnóstico pro painel: o MCP responde? quantas ferramentas tem?
 

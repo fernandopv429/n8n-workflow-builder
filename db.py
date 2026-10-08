@@ -130,6 +130,26 @@ def garantir_schema():
             )
         """)
 
+        # Ferramentas por cliente. Integração nova = MCP novo no n8n, e aqui
+        # fica só quem usa o quê — nenhum código novo por integração.
+        #
+        # `no_atendimento` separa os dois agentes: o chat do painel é operado
+        # por gente da A5, o do WhatsApp recebe texto de desconhecido. Uma base
+        # de conhecimento pode ir pros dois; "cancelar agendamento" talvez não.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cliente_mcps (
+                id SERIAL PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                apelido TEXT NOT NULL,
+                path TEXT NOT NULL,
+                token_cifrado TEXT,
+                ativo BOOLEAN NOT NULL DEFAULT TRUE,
+                no_atendimento BOOLEAN NOT NULL DEFAULT FALSE,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (cliente_id, apelido)
+            )
+        """)
+
         # --- estado do agente de atendimento (ARQUITETURA-AGENTE.md) -------
         # Substitui a tabela `clientes_<nome>` do Supabase, que era UMA POR
         # CLIENTE — o mesmo vício do clone, com DDL a cada cliente novo. Aqui é
@@ -568,6 +588,64 @@ def obter_cliente_por_instancia(instancia: str) -> dict:
         )
         linha = cur.fetchone()
         return _linha_para_cliente(cur, linha) if linha else {}
+
+
+def listar_mcps_do_cliente(cliente_id: int, so_ativos: bool = False,
+                           so_atendimento: bool = False) -> list:
+    """MCPs deste cliente, com o token já decifrado.
+
+    `so_atendimento` é o que o worker usa: traz só o que foi marcado como
+    liberado pro agente que fala com o paciente.
+    """
+    import cofre
+    filtros = ["cliente_id = %s"]
+    if so_ativos or so_atendimento:
+        filtros.append("ativo")
+    if so_atendimento:
+        filtros.append("no_atendimento")
+    with _conectar() as conn:
+        cur = conn.execute(
+            f"SELECT id, apelido, path, token_cifrado, ativo, no_atendimento "
+            f"FROM cliente_mcps WHERE {' AND '.join(filtros)} ORDER BY apelido",
+            (cliente_id,),
+        )
+        linhas = cur.fetchall()
+    saida = []
+    for i, apelido, path, cifrado, ativo, atend in linhas:
+        try:
+            token = cofre.decifrar(cifrado) if cifrado else ""
+        except Exception:  # noqa: BLE001 — cofre trocado não pode esconder o MCP da tela
+            token = ""
+        saida.append({"id": i, "apelido": apelido, "path": path, "token": token,
+                      "ativo": ativo, "no_atendimento": atend})
+    return saida
+
+
+def salvar_mcp_do_cliente(cliente_id: int, apelido: str, path: str, token: str = "",
+                          ativo: bool = True, no_atendimento: bool = False):
+    """Cria ou atualiza. Token vazio não apaga o que já existe — a tela reenvia
+    o formulário inteiro, e campo em branco significa "não mexi nisso"."""
+    import cofre
+    cifrado = cofre.cifrar(token) if (token and cofre.disponivel()) else ""
+    with _conectar() as conn:
+        conn.execute(
+            """INSERT INTO cliente_mcps (cliente_id, apelido, path, token_cifrado,
+                                         ativo, no_atendimento)
+               VALUES (%s, %s, %s, NULLIF(%s,''), %s, %s)
+               ON CONFLICT (cliente_id, apelido) DO UPDATE SET
+                 path = EXCLUDED.path,
+                 token_cifrado = COALESCE(NULLIF(EXCLUDED.token_cifrado,''),
+                                          cliente_mcps.token_cifrado),
+                 ativo = EXCLUDED.ativo,
+                 no_atendimento = EXCLUDED.no_atendimento""",
+            (cliente_id, apelido.strip(), path.strip(), cifrado, bool(ativo), bool(no_atendimento)),
+        )
+
+
+def remover_mcp_do_cliente(cliente_id: int, apelido: str):
+    with _conectar() as conn:
+        conn.execute("DELETE FROM cliente_mcps WHERE cliente_id = %s AND apelido = %s",
+                     (cliente_id, apelido))
 
 
 def definir_agente_ativo(cliente_id: int, ativo: bool):
