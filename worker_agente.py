@@ -50,10 +50,16 @@ MAX_RODADAS = 8
 # conversa trava num mal-entendido — o paciente mesmo recomeça, sem precisar
 # que alguém abra o painel.
 #
-# Lista fechada e comparação exata (sem acento, sem maiúscula): "reset" solto
-# é comando; "preciso resetar minha senha" é conversa. Comparar por "contém"
-# transformaria frase legítima em apagamento de histórico.
-COMANDOS_RESET = {"reset", "resetar", "/reset", "#reset", "reiniciar"}
+# UMA palavra só, "reset", comparada por igualdade exata — mesmo comando dos
+# workflows antigos. Variantes ("resetar", "reiniciar", "/reset") foram
+# retiradas a pedido do Fernando em 07/10/2026: quanto menos coisa dispara
+# apagamento de histórico, menor a chance de apagar sem querer.
+#
+# A normalização (espaços, maiúsculas, acento) continua porque o teclado do
+# celular capitaliza sozinho — "Reset" e "reset" são a mesma intenção. Isso não
+# tira o determinismo: a comparação continua sendo igualdade contra uma palavra,
+# nunca "contém" nem decisão de modelo.
+COMANDOS_RESET = {"reset"}
 RESPOSTA_RESET = "Reset concluído! Vamos do começo."
 
 

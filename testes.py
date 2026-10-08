@@ -602,9 +602,11 @@ def teste_reset_so_dispara_em_comando_exato():
     Comparar por "contém" transformaria frase legítima em apagamento de
     histórico — e o paciente perderia o contexto sem pedir."""
     import worker_agente as w
-    for comando in ("reset", "Reset", "RESET", "  resetar  ", "/reset", "#reset", "reiniciar"):
+    for comando in ("reset", "Reset", "RESET", "  reset  "):
         assert w._eh_comando_reset(comando), f"deveria ser comando: {comando!r}"
-    for conversa in ("preciso resetar minha senha", "como faco reset da conta",
+    # variantes saíram de propósito: quanto menos coisa apaga histórico, melhor
+    for conversa in ("resetar", "/reset", "#reset", "reiniciar",
+                     "preciso resetar minha senha", "como faco reset da conta",
                      "resetou?", "reset do aparelho", "", "oi"):
         assert not w._eh_comando_reset(conversa), f"NÃO deveria ser comando: {conversa!r}"
 
