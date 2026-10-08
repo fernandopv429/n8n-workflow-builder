@@ -150,6 +150,39 @@ def garantir_schema():
             )
         """)
 
+        # Agente geral: um número da A5 por onde o PRÓPRIO CLIENTE pede mudanças
+        # no agente dele ("troca meu prompt", "desliga"). Nada a ver com o
+        # atendimento ao paciente.
+        #
+        # `configuracoes` guarda qual instância do Evolution é essa — é
+        # configuração do sistema, não de cliente, e por isso não cabe em
+        # `clientes`.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS configuracoes (
+                chave TEXT PRIMARY KEY,
+                valor TEXT,
+                atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        # Quem pode pedir, e POR QUAL cliente. Esta tabela é a única autorização
+        # que existe aqui: o número de telefone define o que a pessoa pode
+        # mudar. Nada do que ela ESCREVER altera isso — "sou da clínica tal" é
+        # texto, não credencial.
+        #
+        # UNIQUE no telefone: um número fala por UM cliente. Sem isso, um
+        # demandante cadastrado duas vezes mudaria o agente errado conforme a
+        # ordem da consulta.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS demandantes (
+                id SERIAL PRIMARY KEY,
+                id_whatsapp TEXT NOT NULL UNIQUE,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                nome TEXT,
+                ativo BOOLEAN NOT NULL DEFAULT TRUE,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+
         # --- estado do agente de atendimento (ARQUITETURA-AGENTE.md) -------
         # Substitui a tabela `clientes_<nome>` do Supabase, que era UMA POR
         # CLIENTE — o mesmo vício do clone, com DDL a cada cliente novo. Aqui é
@@ -588,6 +621,66 @@ def obter_cliente_por_instancia(instancia: str) -> dict:
         )
         linha = cur.fetchone()
         return _linha_para_cliente(cur, linha) if linha else {}
+
+
+def obter_config(chave: str, padrao: str = "") -> str:
+    with _conectar() as conn:
+        r = conn.execute("SELECT valor FROM configuracoes WHERE chave = %s", (chave,)).fetchone()
+    return (r[0] if r else "") or padrao
+
+
+def definir_config(chave: str, valor: str):
+    with _conectar() as conn:
+        conn.execute(
+            "INSERT INTO configuracoes (chave, valor) VALUES (%s, %s) "
+            "ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, atualizado_em = now()",
+            (chave, valor),
+        )
+
+
+def obter_demandante(id_whatsapp: str) -> dict:
+    """Quem é este número e por qual cliente ele fala. {} se não cadastrado.
+
+    Não cadastrado é o caso NORMAL: qualquer um pode mandar mensagem pro número
+    da A5. Quem responde decide o que fazer com desconhecido.
+    """
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT d.id, d.id_whatsapp, d.cliente_id, d.nome, d.ativo, c.cliente_nome "
+            "FROM demandantes d JOIN clientes c ON c.id = d.cliente_id "
+            "WHERE d.id_whatsapp = %s",
+            (id_whatsapp,),
+        )
+        r = cur.fetchone()
+    if not r:
+        return {}
+    return dict(zip(["id", "id_whatsapp", "cliente_id", "nome", "ativo", "cliente_nome"], r))
+
+
+def listar_demandantes() -> list:
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT d.id, d.id_whatsapp, d.cliente_id, d.nome, d.ativo, c.cliente_nome "
+            "FROM demandantes d JOIN clientes c ON c.id = d.cliente_id ORDER BY c.cliente_nome"
+        )
+        return [dict(zip(["id", "id_whatsapp", "cliente_id", "nome", "ativo", "cliente_nome"], r))
+                for r in cur.fetchall()]
+
+
+def salvar_demandante(id_whatsapp: str, cliente_id: int, nome: str = "", ativo: bool = True):
+    with _conectar() as conn:
+        conn.execute(
+            "INSERT INTO demandantes (id_whatsapp, cliente_id, nome, ativo) "
+            "VALUES (%s, %s, NULLIF(%s,''), %s) "
+            "ON CONFLICT (id_whatsapp) DO UPDATE SET cliente_id = EXCLUDED.cliente_id, "
+            "nome = COALESCE(EXCLUDED.nome, demandantes.nome), ativo = EXCLUDED.ativo",
+            (id_whatsapp.strip(), cliente_id, nome.strip(), bool(ativo)),
+        )
+
+
+def remover_demandante(id_whatsapp: str):
+    with _conectar() as conn:
+        conn.execute("DELETE FROM demandantes WHERE id_whatsapp = %s", (id_whatsapp,))
 
 
 def listar_mcps_do_cliente(cliente_id: int, so_ativos: bool = False,

@@ -43,6 +43,7 @@ sys.path.insert(0, str(RAIZ / ".pylibs"))
 sys.path.insert(0, str(RAIZ))
 
 import agente_chat  # noqa: E402
+import agente_geral  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_cliente  # noqa: E402
@@ -96,6 +97,10 @@ ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
 ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
 # Ferramentas por cliente: integração nova vira MCP novo no n8n, e aqui se
 # escolhe quem usa o quê. O catálogo é descoberto do próprio n8n.
+# Agente geral: número da A5 por onde o próprio cliente pede mudanças no
+# agente dele. A autorização é o cadastro de demandantes, nada mais.
+ROTA_GERAL = re.compile(r"^/geral$")
+ROTA_GERAL_DEMANDANTES = re.compile(r"^/geral/demandantes$")
 ROTA_MCPS_CATALOGO = re.compile(r"^/mcps$")
 ROTA_CLIENTE_MCPS = re.compile(r"^/clientes/(\d+)/mcps$")
 # Projeto da OpenAI por cliente, SEM depender de Kommo nem de clonagem. Antes
@@ -284,6 +289,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._responder_json(200, {"instancia": nome, "status": f"erro: {e}"})
             return
 
+        if ROTA_GERAL.match(self.path):
+            inst = agente_geral.instancia_configurada()
+            estado = "não configurada"
+            if inst and evolution_client.disponivel():
+                try:
+                    estado = evolution_client.status(inst)
+                except evolution_client.EvolutionError as e:
+                    estado = f"erro: {e}"
+            self._responder_json(200, {
+                "instancia": inst, "status": estado,
+                "demandantes": db.listar_demandantes(),
+                "clientes": [{"id": c["id"], "nome": c["cliente_nome"]}
+                             for c in db.listar_clientes()]})
+            return
+
         if ROTA_MCPS_CATALOGO.match(self.path):
             try:
                 self._responder_json(200, {"mcps": mcp_cliente.catalogo()})
@@ -362,6 +382,45 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._autenticado():
+            return
+
+        if ROTA_GERAL.match(self.path):
+            if not evolution_client.disponivel():
+                self._responder_json(503, {"error": "EVOLUTION_URL/EVOLUTION_APIKEY não configuradas"})
+                return
+            nome = agente_geral.instancia_configurada() or "a5-central"
+            try:
+                if not evolution_client.existe(nome):
+                    criada = evolution_client.criar_instancia(nome)
+                    db.definir_config(agente_geral.CHAVE_INSTANCIA, nome)
+                    self._responder_json(200, {**criada, "novo": True})
+                    return
+                evolution_client.definir_webhook(nome)
+                db.definir_config(agente_geral.CHAVE_INSTANCIA, nome)
+                estado = evolution_client.status(nome)
+                if estado == "open":
+                    self._responder_json(200, {"nome": nome, "status": estado, "conectada": True})
+                    return
+                self._responder_json(200, {"nome": nome, "status": estado,
+                                           "conectada": False, **evolution_client.obter_qr(nome)})
+                return
+            except evolution_client.EvolutionError as e:
+                self._responder_json(502, {"error": str(e)})
+                return
+
+        if ROTA_GERAL_DEMANDANTES.match(self.path):
+            corpo = self._ler_corpo()
+            tel = "".join(ch for ch in str(corpo.get("id_whatsapp", "")) if ch.isdigit())
+            cliente_id = int(corpo.get("cliente_id") or 0)
+            if not tel or not cliente_id or db.obter_cliente(cliente_id) is None:
+                self._responder_json(400, {"error": "telefone e cliente são obrigatórios"})
+                return
+            db.salvar_demandante(tel, cliente_id, str(corpo.get("nome", "")),
+                                 bool(corpo.get("ativo", True)))
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"{tel} autorizado a pedir mudanças neste agente pelo WhatsApp da A5.")
+            self._responder_json(200, {"salvo": True})
             return
 
         m = ROTA_CLIENTE_MCPS.match(self.path)
@@ -672,6 +731,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         if not self._autenticado():
+            return
+
+        if ROTA_GERAL_DEMANDANTES.match(self.path):
+            tel = str(self._ler_corpo().get("id_whatsapp", "")).strip()
+            db.remover_demandante(tel)
+            self._responder_json(200, {"removido": True})
             return
 
         m = ROTA_CLIENTE_MCPS.match(self.path)

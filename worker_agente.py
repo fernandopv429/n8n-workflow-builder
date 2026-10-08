@@ -34,7 +34,8 @@ sys.path.insert(0, RAIZ)
 
 import pika  # noqa: E402
 
-import agente_chat  # noqa: E402  (reaproveita as travas já testadas)
+import agente_chat  # noqa: E402
+import agente_geral  # noqa: E402  (reaproveita as travas já testadas)
 import config  # noqa: E402
 import db  # noqa: E402
 import mcp_cliente  # noqa: E402
@@ -375,6 +376,13 @@ def processar(payload: dict) -> dict:
     # é a mensagem — manda a `instancia` do Evolution e nós resolvemos aqui.
     # `cliente_id` direto continua aceito, pra teste e pra quem publicar na mão.
     instancia = str(payload.get("instancia") or "").strip()
+
+    # Instância do agente geral: quem escreve ali é o CLIENTE da A5 pedindo
+    # mudança no agente dele, não paciente. Rota completamente separada —
+    # ferramentas, autorização e destino da conversa são outros.
+    if instancia and instancia == agente_geral.instancia_configurada():
+        return _processar_geral(payload, instancia)
+
     if instancia:
         cliente = db.obter_cliente_por_instancia(instancia)
         if not cliente:
@@ -469,6 +477,42 @@ def processar(payload: dict) -> dict:
         "texto": resposta,
         "mensagem_id": mensagem_id,
     }
+
+
+def _processar_geral(payload: dict, instancia: str) -> dict | None:
+    """Mensagem recebida no número da A5 (ver agente_geral.py)."""
+    id_whatsapp = str(payload["id_whatsapp"])
+    mensagem_id = str(payload.get("mensagem_id") or "")
+    texto = (payload.get("texto") or "").strip()
+
+    demandante = db.obter_demandante(id_whatsapp)
+    if not demandante or not demandante["ativo"]:
+        # Número não cadastrado: responde cordial e PARA. Não registramos nada
+        # no banco — qualquer um pode escrever num número que estará em
+        # assinatura de e-mail, e guardar essas conversas só criaria lixo.
+        return {"instancia": instancia, "id_whatsapp": id_whatsapp,
+                "texto": agente_geral.RESPOSTA_DESCONHECIDO, "mensagem_id": mensagem_id,
+                "cliente_id": 0}
+
+    cliente_id = demandante["cliente_id"]
+    if mensagem_id and not db.registrar_mensagem_processada(mensagem_id, cliente_id):
+        return None
+
+    # A conversa é guardada no cliente de quem ela fala, com o telefone como
+    # contato — assim ela aparece no painel junto do resto daquele cliente.
+    contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp,
+                                        demandante.get("nome") or payload.get("nome", ""))
+    if agente_geral and _eh_comando_reset(texto):
+        db.limpar_conversa(contato["id"])
+        return {"cliente_id": cliente_id, "instancia": instancia,
+                "id_whatsapp": id_whatsapp, "texto": RESPOSTA_RESET,
+                "mensagem_id": mensagem_id}
+
+    db.salvar_mensagem_agente(contato["id"], "user", texto)
+    resposta = agente_geral.responder(demandante, contato, texto)
+    db.salvar_mensagem_agente(contato["id"], "assistant", resposta)
+    return {"cliente_id": cliente_id, "instancia": instancia,
+            "id_whatsapp": id_whatsapp, "texto": resposta, "mensagem_id": mensagem_id}
 
 
 def _conectar():

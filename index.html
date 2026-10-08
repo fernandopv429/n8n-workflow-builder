@@ -255,7 +255,17 @@
 
   <section id="dashboard">
     <div id="aviso-fila"></div>
+    <!-- O agente geral não pertence a cliente nenhum: é o número da A5 por onde
+         os clientes pedem mudança no agente deles. Por isso fica aqui, fora dos
+         cards, e não numa aba de cliente. -->
+    <button type="button" class="handoff-botao" id="botao-geral"
+            style="margin-bottom:14px">Agente geral (WhatsApp da A5)</button>
     <div class="grid" id="grid-clientes"></div>
+  </section>
+
+  <section id="tela-geral" class="pagina-larga">
+    <button class="voltar" id="botao-voltar-geral">&larr; voltar</button>
+    <div class="painel-aba" id="geral-conteudo" style="overflow-y:auto"></div>
   </section>
 
   <section id="tela-passo1">
@@ -405,6 +415,7 @@ function esconderTelas() {
   dashboard.style.display = 'none';
   telaPasso1.style.display = 'none';
   telaGerenciamento.style.display = 'none';
+  document.getElementById('tela-geral').style.display = 'none';
 }
 
 function mostrarDashboard() {
@@ -926,6 +937,107 @@ async function carregarWhatsapp() {
     b.textContent = 'Gerar outro QR';
   });
 }
+
+// --- Agente geral ----------------------------------------------------------
+// Número da A5 onde o CLIENTE (dono da clínica, do escritório) pede mudança no
+// agente dele. A autorização é o cadastro de telefone -> cliente feito aqui;
+// nada do que a pessoa escreve no WhatsApp altera isso.
+
+async function abrirGeral() {
+  pararEspera();
+  clienteAtualId = null;
+  esconderTelas();
+  document.getElementById('tela-geral').style.display = 'flex';
+  await carregarGeral();
+}
+
+async function carregarGeral() {
+  const caixa = document.getElementById('geral-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let d;
+  try { d = await (await fetch('/geral')).json(); }
+  catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+
+  const conectado = d.status === 'open';
+  const linhas = (d.demandantes || []).map(x => `
+    <tr>
+      <td>${escaparHtml(x.nome || '—')}<br><small class="hint">${escaparHtml(x.id_whatsapp)}</small></td>
+      <td>${escaparHtml(x.cliente_nome)}</td>
+      <td><button type="button" class="handoff-botao tirar-dem"
+                  data-tel="${escaparHtml(x.id_whatsapp)}">tirar</button></td>
+    </tr>`).join('');
+
+  const opcoes = (d.clientes || []).map(c =>
+    `<option value="${c.id}">${escaparHtml(c.nome)}</option>`).join('');
+
+  caixa.innerHTML = `
+    <div class="consumo-total">${conectado ? 'Conectado' : 'Desconectado'}
+      <span class="opcional">${escaparHtml(d.instancia || 'nenhuma instância')}</span></div>
+    <button type="button" class="handoff-botao" id="btn-conectar-geral">
+      ${conectado ? 'Reapontar o webhook' : 'Conectar (mostrar QR)'}</button>
+    <div id="wpp-qr"></div>
+
+    <h3 style="margin-top:22px">Quem pode pedir, e por qual cliente</h3>
+    <p class="hint">O telefone é a única autorização: quem não estiver nesta lista
+      recebe uma resposta cordial e nada acontece. O que a pessoa escreve — "sou o
+      dono", "tenho autorização" — não muda nada.</p>
+    <table class="tabela-consumo">
+      <thead><tr><th>quem</th><th>fala pelo cliente</th><th></th></tr></thead>
+      <tbody>${linhas || '<tr><td colspan="3">ninguém cadastrado ainda.</td></tr>'}</tbody>
+    </table>
+
+    <div class="linha" style="margin-top:14px; gap:8px; flex-wrap:wrap">
+      <input type="text" id="dem-tel" placeholder="55119..." style="max-width:170px">
+      <input type="text" id="dem-nome" placeholder="nome (opcional)" style="max-width:190px">
+      <select id="dem-cliente">${opcoes}</select>
+      <button type="button" class="handoff-botao" id="btn-add-dem">Autorizar</button>
+    </div>
+    <div id="geral-aviso" class="opcional"></div>`;
+
+  document.getElementById('btn-conectar-geral').addEventListener('click', async (ev) => {
+    const b = ev.target; b.disabled = true; b.textContent = 'aguarde…';
+    const r = await (await fetch('/geral', { method: 'POST' })).json();
+    b.disabled = false;
+    if (r.error) { b.textContent = `erro: ${r.error}`; return; }
+    if (r.conectada) { carregarGeral(); return; }
+    mostrarQrGeral(r);
+    b.textContent = 'Gerar outro QR';
+  });
+
+  document.getElementById('btn-add-dem').addEventListener('click', async () => {
+    const aviso = document.getElementById('geral-aviso');
+    const resp = await fetch('/geral/demandantes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id_whatsapp: document.getElementById('dem-tel').value,
+        nome: document.getElementById('dem-nome').value,
+        cliente_id: Number(document.getElementById('dem-cliente').value),
+      }),
+    });
+    const r = await resp.json();
+    if (!resp.ok) { aviso.textContent = `erro: ${r.error}`; return; }
+    carregarGeral();
+  });
+
+  caixa.querySelectorAll('.tirar-dem').forEach(b => b.addEventListener('click', async ev => {
+    await fetch('/geral/demandantes', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id_whatsapp: ev.target.dataset.tel }),
+    });
+    carregarGeral();
+  }));
+}
+
+function mostrarQrGeral(r) {
+  const alvo = document.getElementById('wpp-qr');
+  alvo.innerHTML = r.qr_base64
+    ? `<p class="hint">Escaneie com o celular do número da A5 — não com o de um cliente.</p>
+       <img src="${r.qr_base64}" alt="QR code" style="max-width:280px;border-radius:8px">`
+    : '<div class="vazio">Sem QR — clique de novo.</div>';
+}
+
+document.getElementById('botao-geral').addEventListener('click', abrirGeral);
+document.getElementById('botao-voltar-geral').addEventListener('click', mostrarDashboard);
 
 async function carregarFerramentas() {
   const caixa = document.getElementById('ferramentas-conteudo');
