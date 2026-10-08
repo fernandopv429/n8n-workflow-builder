@@ -380,7 +380,9 @@ class Handler(BaseHTTPRequestHandler):
             # Testa ANTES de gravar: MCP que não responde cadastrado vira
             # ferramenta quebrada na mão do agente, e a falha só aparece no meio
             # de uma conversa com paciente.
-            teste = mcp_cliente.testar(path, str(corpo.get("token", "")).strip())
+            token = (str(corpo.get("token", "")).strip()
+                     or ENV.get("MCP_TOKEN_INTERNO", "").strip())
+            teste = mcp_cliente.testar(path, token)
             if not teste["ok"]:
                 self._responder_json(400, {"error": f"o MCP não respondeu: {teste['motivo']}"})
                 return

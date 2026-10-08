@@ -616,6 +616,12 @@ def listar_mcps_do_cliente(cliente_id: int, so_ativos: bool = False,
             token = cofre.decifrar(cifrado) if cifrado else ""
         except Exception:  # noqa: BLE001 — cofre trocado não pode esconder o MCP da tela
             token = ""
+        # Sem token próprio, cai no bearer compartilhado dos MCPs internos: desde
+        # 07/10/2026 todos exigem token, e obrigar a digitar em cada ligação só
+        # geraria erro de digitação. MCP de terceiro, com token próprio, continua
+        # usando o dele.
+        if not token:
+            token = carregar_env().get("MCP_TOKEN_INTERNO", "").strip()
         saida.append({"id": i, "apelido": apelido, "path": path, "token": token,
                       "ativo": ativo, "no_atendimento": atend})
     return saida
