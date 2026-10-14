@@ -63,6 +63,13 @@ def _chamar(metodo: str, caminho: str, corpo: dict | None = None):
             return json.loads(bruto) if bruto else {}
     except urllib.error.HTTPError as e:
         raise EvolutionError(e.code, e.read().decode("utf-8", "replace")[:400]) from None
+    except urllib.error.URLError as e:
+        # Evolution fora do ar, DNS errado, recusou conexão — sem isto o erro
+        # cru escapava até o servidor como exceção não tratada, que devolve
+        # resposta não-JSON e quebra o front no meio da leitura do QR.
+        raise EvolutionError(0, f"não foi possível conectar: {e.reason}") from None
+    except TimeoutError:
+        raise EvolutionError(0, f"sem resposta em {TIMEOUT}s") from None
 
 
 def url_do_trilho() -> str:
@@ -118,11 +125,27 @@ def criar_instancia(nome: str) -> dict:
     }
     d = _chamar("POST", "/instance/create", corpo)
     qr = d.get("qrcode") or {}
+    base64_qr = qr.get("base64") or ""
+    codigo_qr = qr.get("code") or ""
+
+    # A Evolution sobe o socket do Baileys de forma assíncrona: na maioria das
+    # vezes o QR ainda não está pronto na resposta do /instance/create, e só
+    # aparece de verdade no /instance/connect logo em seguida. Sem isto, quem
+    # clica pela primeira vez via "sem QR, clique de novo" e não sabe que
+    # precisa clicar de novo — melhor já buscar aqui, numa chamada só.
+    if not base64_qr:
+        try:
+            seguinte = obter_qr(nome)
+            base64_qr = seguinte.get("qr_base64") or ""
+            codigo_qr = seguinte.get("qr_codigo") or codigo_qr
+        except EvolutionError:
+            pass  # instância foi criada mesmo assim; devolve sem QR a lidar depois
+
     return {
         "nome": nome,
         "webhook": url_do_trilho(),
-        "qr_base64": qr.get("base64") or "",
-        "qr_codigo": qr.get("code") or "",
+        "qr_base64": base64_qr,
+        "qr_codigo": codigo_qr,
         "status": (d.get("instance") or {}).get("status") or "criada",
     }
 

@@ -975,7 +975,7 @@ async function carregarGeral() {
       <span class="opcional">${escaparHtml(d.instancia || 'nenhuma instância')}</span></div>
     <button type="button" class="handoff-botao" id="btn-conectar-geral">
       ${conectado ? 'Reapontar o webhook' : 'Conectar (mostrar QR)'}</button>
-    <div id="wpp-qr"></div>
+    <div id="wpp-qr-geral"></div>
 
     <h3 style="margin-top:22px">Quem pode pedir, e por qual cliente</h3>
     <p class="hint">O telefone é a única autorização: quem não estiver nesta lista
@@ -996,7 +996,17 @@ async function carregarGeral() {
 
   document.getElementById('btn-conectar-geral').addEventListener('click', async (ev) => {
     const b = ev.target; b.disabled = true; b.textContent = 'aguarde…';
-    const r = await (await fetch('/geral', { method: 'POST' })).json();
+    let r;
+    try {
+      const resp = await fetch('/geral', { method: 'POST' });
+      r = await resp.json();
+    } catch (e) {
+      // resposta não-JSON (proxy devolvendo página de erro, conexão caindo no
+      // meio) não pode travar o botão em "aguarde…" pra sempre — sem isto a
+      // tela ficava parada sem indicar o que houve.
+      b.disabled = false; b.textContent = 'erro ao conectar — tente de novo';
+      return;
+    }
     b.disabled = false;
     if (r.error) { b.textContent = `erro: ${r.error}`; return; }
     if (r.conectada) { carregarGeral(); return; }
@@ -1029,11 +1039,12 @@ async function carregarGeral() {
 }
 
 function mostrarQrGeral(r) {
-  const alvo = document.getElementById('wpp-qr');
+  const alvo = document.getElementById('wpp-qr-geral');
+  if (!alvo) return;
   alvo.innerHTML = r.qr_base64
     ? `<p class="hint">Escaneie com o celular do número da A5 — não com o de um cliente.</p>
        <img src="${r.qr_base64}" alt="QR code" style="max-width:280px;border-radius:8px">`
-    : '<div class="vazio">Sem QR — clique de novo.</div>';
+    : '<div class="vazio">Instância criada, mas sem QR — clique em "Gerar outro QR".</div>';
 }
 
 document.getElementById('botao-geral').addEventListener('click', abrirGeral);
