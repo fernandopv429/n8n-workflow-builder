@@ -915,73 +915,6 @@ async function carregarWhatsapp() {
       <div id="wpp-qr"></div>`;
   }
 
-  // Grupo onde o resumo periódico de atendimento deste cliente é mandado
-  // (quem envia é um Schedule Trigger no n8n, pela instância do agente geral
-  // — aqui só cadastra o destino). Independente de WhatsApp do CLIENTE
-  // conectado ou não: o grupo é de quem recebe o aviso, não de quem atende.
-  const grupoAtual = cli.whatsapp_grupo_aviso || '';
-  caixa.innerHTML += `
-    <h3 style="margin-top:22px">Resumo periódico de atendimento</h3>
-    <p class="hint">Grupo do WhatsApp que recebe o resumo (quantos contatos a
-      IA atendeu hoje/no mês). Precisa que o número do agente geral
-      (a5-central) já esteja ADICIONADO no grupo — é ele quem manda a
-      mensagem. Vazio = este cliente não entra no envio.</p>
-    <div id="grupo-aviso-area">carregando grupos…</div>`;
-
-  (async () => {
-    const area = document.getElementById('grupo-aviso-area');
-    let g;
-    try { g = await (await fetch('/geral/grupos')).json(); }
-    catch (e) { g = { grupos: [], erro: 'falha ao consultar' }; }
-
-    const grupos = g.grupos || [];
-    // achou na lista: oferece select; senão (lista vazia, erro, ou o valor
-    // salvo não bate com nenhum grupo atual) cai pro campo manual — sem isso,
-    // um erro na Evolution travaria o cadastro do grupo também.
-    const bateComLista = grupos.some(x => x.id === grupoAtual);
-    const usarSelect = grupos.length > 0 && (!grupoAtual || bateComLista);
-
-    area.innerHTML = `
-      ${g.erro ? `<p class="hint">Não consegui listar os grupos automaticamente (${escaparHtml(g.erro)}) — cole o JID manualmente.</p>` : ''}
-      <div class="linha" style="gap:8px">
-        ${usarSelect ? `
-          <select id="grupo-aviso-select" style="flex:1">
-            <option value="">— nenhum —</option>
-            ${grupos.map(x => `<option value="${escaparHtml(x.id)}" ${x.id === grupoAtual ? 'selected' : ''}>${escaparHtml(x.nome)}</option>`).join('')}
-            <option value="__manual__">(colar JID manualmente)</option>
-          </select>
-        ` : ''}
-        <input type="text" id="grupo-aviso" placeholder="120363...@g.us"
-               value="${escaparHtml(grupoAtual)}"
-               style="flex:1; ${usarSelect ? 'display:none' : ''}">
-        <button type="button" class="handoff-botao" id="btn-salvar-grupo">Salvar</button>
-      </div>`;
-
-    if (usarSelect) {
-      document.getElementById('grupo-aviso-select').addEventListener('change', (ev) => {
-        const manual = document.getElementById('grupo-aviso');
-        if (ev.target.value === '__manual__') {
-          manual.style.display = ''; manual.value = ''; manual.focus();
-        } else {
-          manual.style.display = 'none'; manual.value = ev.target.value;
-        }
-      });
-    }
-
-    document.getElementById('btn-salvar-grupo').addEventListener('click', async (ev) => {
-      const b = ev.target; b.disabled = true;
-      const grupo = document.getElementById('grupo-aviso').value.trim();
-      await fetch(`/clientes/${clienteAtualId}/grupo-aviso`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ grupo }),
-      });
-      b.disabled = false;
-      b.textContent = 'Salvo';
-      setTimeout(() => { b.textContent = 'Salvar'; }, 1500);
-      carregarLogs();
-    });
-  })();
-
   document.getElementById('btn-liga-agente').addEventListener('click', async (ev) => {
     const b = ev.target; b.disabled = true;
     await fetch(`/clientes/${clienteAtualId}/ativo`, {
@@ -1021,9 +954,13 @@ async function abrirGeral() {
 async function carregarGeral() {
   const caixa = document.getElementById('geral-conteudo');
   caixa.innerHTML = 'carregando…';
-  let d;
+  let d, aviso, grupos;
   try { d = await (await fetch('/geral')).json(); }
   catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+  // Grupo e lista de clientes-com-grupo são side-quest: se a Evolution estiver
+  // fora do ar, isso não pode impedir de ver/mexer nos demandantes.
+  try { aviso = await (await fetch('/clientes-aviso')).json(); } catch (e) { aviso = { clientes: [] }; }
+  try { grupos = await (await fetch('/geral/grupos')).json(); } catch (e) { grupos = { grupos: [] }; }
 
   const conectado = d.status === 'open';
   const linhas = (d.demandantes || []).map(x => `
@@ -1036,6 +973,20 @@ async function carregarGeral() {
 
   const opcoes = (d.clientes || []).map(c =>
     `<option value="${c.id}">${escaparHtml(c.nome)}</option>`).join('');
+
+  // Nome do grupo, quando dá pra achar na lista da Evolution — senão mostra o
+  // JID cru (grupo configurado há pouco ou com a instância fora do ar na hora).
+  const nomeDoGrupo = (jid) => (grupos.grupos || []).find(g => g.id === jid)?.nome || jid;
+  const linhasAviso = (aviso.clientes || []).map(c => `
+    <tr>
+      <td>${escaparHtml(c.cliente_nome)}</td>
+      <td>${escaparHtml(nomeDoGrupo(c.grupo))}</td>
+      <td><button type="button" class="handoff-botao tirar-aviso"
+                  data-id="${c.id}">tirar</button></td>
+    </tr>`).join('');
+
+  const opcoesGrupo = (grupos.grupos || []).map(g =>
+    `<option value="${escaparHtml(g.id)}">${escaparHtml(g.nome)}</option>`).join('');
 
   caixa.innerHTML = `
     <div class="consumo-total">${conectado ? 'Conectado' : 'Desconectado'}
@@ -1059,7 +1010,29 @@ async function carregarGeral() {
       <select id="dem-cliente">${opcoes}</select>
       <button type="button" class="handoff-botao" id="btn-add-dem">Autorizar</button>
     </div>
-    <div id="geral-aviso" class="opcional"></div>`;
+    <div id="geral-aviso" class="opcional"></div>
+
+    <h3 style="margin-top:22px">Resumo periódico de atendimento, por grupo</h3>
+    <p class="hint">Todo dia o sistema manda, pelo WhatsApp do a5-central, quantos
+      contatos a IA atendeu hoje/no mês — mas só pros clientes com um grupo
+      cadastrado aqui. O a5-central precisa já estar ADICIONADO no grupo do
+      WhatsApp antes de aparecer na lista abaixo.</p>
+    <table class="tabela-consumo">
+      <thead><tr><th>cliente</th><th>grupo</th><th></th></tr></thead>
+      <tbody>${linhasAviso || '<tr><td colspan="3">nenhum cliente com grupo cadastrado ainda.</td></tr>'}</tbody>
+    </table>
+
+    <div class="linha" style="margin-top:14px; gap:8px; flex-wrap:wrap">
+      <select id="aviso-cliente">${opcoes}</select>
+      ${opcoesGrupo ? `
+        <select id="aviso-grupo" style="min-width:220px">${opcoesGrupo}</select>
+      ` : `
+        <input type="text" id="aviso-grupo-manual" placeholder="120363...@g.us (cole o JID)" style="min-width:220px">
+      `}
+      <button type="button" class="handoff-botao" id="btn-salvar-aviso">Cadastrar</button>
+    </div>
+    ${grupos.erro ? `<p class="hint">Não consegui listar os grupos automaticamente (${escaparHtml(grupos.erro)}) — cole o JID manualmente.</p>` : ''}
+    <div id="aviso-status" class="opcional"></div>`;
 
   document.getElementById('btn-conectar-geral').addEventListener('click', async (ev) => {
     const b = ev.target; b.disabled = true; b.textContent = 'aguarde…';
@@ -1100,6 +1073,27 @@ async function carregarGeral() {
     await fetch('/geral/demandantes', {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id_whatsapp: ev.target.dataset.tel }),
+    });
+    carregarGeral();
+  }));
+
+  document.getElementById('btn-salvar-aviso').addEventListener('click', async () => {
+    const status = document.getElementById('aviso-status');
+    const clienteId = document.getElementById('aviso-cliente').value;
+    const campoGrupo = document.getElementById('aviso-grupo') || document.getElementById('aviso-grupo-manual');
+    const grupo = (campoGrupo.value || '').trim();
+    if (!grupo) { status.textContent = 'escolha ou cole um grupo.'; return; }
+    await fetch(`/clientes/${clienteId}/grupo-aviso`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grupo }),
+    });
+    carregarGeral();
+  });
+
+  caixa.querySelectorAll('.tirar-aviso').forEach(b => b.addEventListener('click', async ev => {
+    await fetch(`/clientes/${ev.target.dataset.id}/grupo-aviso`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grupo: '' }),
     });
     carregarGeral();
   }));
