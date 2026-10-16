@@ -86,6 +86,11 @@ def garantir_schema():
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_instancia "
             "ON clientes (evolution_instancia) WHERE evolution_instancia IS NOT NULL"
         )
+        # Grupo do WhatsApp (JID, ex: 1203630...-...@g.us) onde o resumo
+        # periódico de atendimento deste cliente é mandado. Fica vazio até
+        # alguém cadastrar — sem grupo configurado, o cliente simplesmente não
+        # entra no envio (ver resumo_atendimento em servidor.py).
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS whatsapp_grupo_aviso TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -365,6 +370,55 @@ def listar_mensagens_agente(contato_id: int, limite: int = 20) -> list:
             (contato_id, limite),
         ).fetchall()
     return [{"role": r[0], "conteudo": r[1]} for r in linhas]
+
+
+def definir_grupo_aviso(cliente_id: int, grupo_jid: str):
+    """JID do grupo do WhatsApp (ex: 1203630...@g.us) onde o resumo periódico
+    de atendimento deste cliente é mandado. Vazio desliga o envio pra ele."""
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET whatsapp_grupo_aviso = NULLIF(%s, ''), atualizado_em = now() "
+            "WHERE id = %s",
+            (grupo_jid.strip(), cliente_id),
+        )
+
+
+def listar_clientes_com_grupo_aviso() -> list:
+    """Só os clientes com grupo cadastrado — é quem entra no envio do resumo
+    periódico (ver resumo_atendimento em servidor.py, chamado pelo n8n)."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            "SELECT id, cliente_nome, whatsapp_grupo_aviso FROM clientes "
+            "WHERE whatsapp_grupo_aviso IS NOT NULL"
+        ).fetchall()
+    return [{"id": r[0], "cliente_nome": r[1], "grupo": r[2]} for r in linhas]
+
+
+def resumo_atendimento(cliente_id: int) -> dict:
+    """Quantos contatos distintos a IA atendeu hoje e neste mês.
+
+    'Atendeu' = teve pelo menos uma resposta do agente (role='assistant') no
+    período — é a métrica mais simples que já diz algo útil; separar por
+    etapa/funil ou contar handoff finalizado fica pra quando isso for mapeado
+    direito (o Fernando pediu só esse número por enquanto, 15/10/2026).
+    """
+    with _conectar() as conn:
+        linha = conn.execute(
+            """
+            SELECT
+                count(DISTINCT c.id) FILTER (
+                    WHERE m.criado_em >= date_trunc('day', now())
+                ),
+                count(DISTINCT c.id) FILTER (
+                    WHERE m.criado_em >= date_trunc('month', now())
+                )
+            FROM contatos c
+            JOIN agente_mensagens m ON m.contato_id = c.id
+            WHERE c.cliente_id = %s AND m.role = 'assistant'
+            """,
+            (cliente_id,),
+        ).fetchone()
+    return {"atendidos_hoje": linha[0] or 0, "atendidos_mes": linha[1] or 0}
 
 
 def registrar_mensagem_processada(mensagem_id: str, cliente_id: int) -> bool:

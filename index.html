@@ -915,6 +915,34 @@ async function carregarWhatsapp() {
       <div id="wpp-qr"></div>`;
   }
 
+  // Grupo onde o resumo periódico de atendimento deste cliente é mandado
+  // (quem envia é um Schedule Trigger no n8n — aqui só cadastra o destino).
+  // Independente de WhatsApp conectado ou não: o grupo é de quem recebe o
+  // aviso, não do número que atende o paciente.
+  caixa.innerHTML += `
+    <h3 style="margin-top:22px">Resumo periódico de atendimento</h3>
+    <p class="hint">JID do grupo do WhatsApp que recebe o resumo (quantos
+      contatos a IA atendeu hoje/no mês). Vazio = este cliente não entra no
+      envio.</p>
+    <div class="linha" style="gap:8px">
+      <input type="text" id="grupo-aviso" placeholder="120363...@g.us"
+             value="${escaparHtml(cli.whatsapp_grupo_aviso || '')}" style="flex:1">
+      <button type="button" class="handoff-botao" id="btn-salvar-grupo">Salvar</button>
+    </div>`;
+
+  document.getElementById('btn-salvar-grupo').addEventListener('click', async (ev) => {
+    const b = ev.target; b.disabled = true;
+    const grupo = document.getElementById('grupo-aviso').value.trim();
+    await fetch(`/clientes/${clienteAtualId}/grupo-aviso`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grupo }),
+    });
+    b.disabled = false;
+    b.textContent = 'Salvo';
+    setTimeout(() => { b.textContent = 'Salvar'; }, 1500);
+    carregarLogs();
+  });
+
   document.getElementById('btn-liga-agente').addEventListener('click', async (ev) => {
     const b = ev.target; b.disabled = true;
     await fetch(`/clientes/${clienteAtualId}/ativo`, {

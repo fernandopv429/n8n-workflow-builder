@@ -95,6 +95,11 @@ ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
 # mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
 ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
 ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
+# Resumo periódico de atendimento, mandado num grupo do WhatsApp por cliente
+# (quem dispara o envio é um Schedule Trigger no n8n, chamando estas rotas).
+ROTA_CLIENTE_GRUPO_AVISO = re.compile(r"^/clientes/(\d+)/grupo-aviso$")
+ROTA_CLIENTE_RESUMO = re.compile(r"^/clientes/(\d+)/resumo$")
+ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
 # Ferramentas por cliente: integração nova vira MCP novo no n8n, e aqui se
 # escolhe quem usa o quê. O catálogo é descoberto do próprio n8n.
 # Agente geral: número da A5 por onde o próprio cliente pede mudanças no
@@ -354,6 +359,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._responder_json(200, {"disponivel": False, "motivo": motivo, "dias": 30})
                 return
             self._responder_json(200, openai_admin.consumo_do_projeto(projeto))
+            return
+
+        if ROTA_CLIENTES_AVISO.match(self.path):
+            self._responder_json(200, {"clientes": db.listar_clientes_com_grupo_aviso()})
+            return
+
+        m = ROTA_CLIENTE_RESUMO.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            cliente = db.obter_cliente(cliente_id)
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            self._responder_json(200, {
+                "cliente_nome": cliente["cliente_nome"],
+                "grupo": cliente.get("whatsapp_grupo_aviso") or "",
+                **db.resumo_atendimento(cliente_id),
+            })
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)
@@ -864,6 +887,22 @@ class Handler(BaseHTTPRequestHandler):
                 else "Agente DESLIGADO — mensagens continuam sendo guardadas, "
                      "mas ninguém responde até religar.")
             self._responder_json(200, {"ativo": ativo})
+            return
+
+        m = ROTA_CLIENTE_GRUPO_AVISO.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            grupo = str(self._ler_corpo().get("grupo", "")).strip()
+            db.definir_grupo_aviso(cliente_id, grupo)
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Grupo de aviso de atendimento definido: {grupo}" if grupo
+                else "Grupo de aviso de atendimento removido — este cliente para de "
+                     "entrar no resumo periódico.")
+            self._responder_json(200, {"grupo": grupo})
             return
 
         m = ROTA_CLIENTE_PROMPT.match(self.path)
