@@ -105,6 +105,15 @@ def existe(nome: str) -> bool:
     return any(i["nome"] == nome for i in listar_instancias())
 
 
+def listar_grupos(nome_instancia: str) -> list:
+    """Grupos que esta instância participa — pra escolher o grupo de aviso na
+    tela sem precisar caçar o JID na mão (ele não aparece em lugar nenhum do
+    WhatsApp normal). A instância precisa JÁ estar dentro do grupo."""
+    d = _chamar("GET", f"/group/fetchAllGroups/{urllib.parse.quote(nome_instancia)}?getParticipants=false")
+    itens = d if isinstance(d, list) else d.get("groups", [])
+    return [{"id": g.get("id"), "nome": g.get("subject") or g.get("id")} for g in itens if g.get("id")]
+
+
 def criar_instancia(nome: str) -> dict:
     """Cria a instância JÁ com o webhook do trilho apontado.
 

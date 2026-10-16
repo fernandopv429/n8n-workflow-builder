@@ -106,6 +106,9 @@ ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
 # agente dele. A autorização é o cadastro de demandantes, nada mais.
 ROTA_GERAL = re.compile(r"^/geral$")
 ROTA_GERAL_DEMANDANTES = re.compile(r"^/geral/demandantes$")
+# Grupos que a instância do agente geral participa — pra escolher o destino
+# do resumo periódico de atendimento sem caçar JID na mão (ver index.html).
+ROTA_GERAL_GRUPOS = re.compile(r"^/geral/grupos$")
 ROTA_MCPS_CATALOGO = re.compile(r"^/mcps$")
 ROTA_CLIENTE_MCPS = re.compile(r"^/clientes/(\d+)/mcps$")
 # Projeto da OpenAI por cliente, SEM depender de Kommo nem de clonagem. Antes
@@ -307,6 +310,20 @@ class Handler(BaseHTTPRequestHandler):
                 "demandantes": db.listar_demandantes(),
                 "clientes": [{"id": c["id"], "nome": c["cliente_nome"]}
                              for c in db.listar_clientes()]})
+            return
+
+        if ROTA_GERAL_GRUPOS.match(self.path):
+            inst = agente_geral.instancia_configurada()
+            if not inst or not evolution_client.disponivel():
+                self._responder_json(200, {"grupos": [], "erro":
+                    "instância do agente geral ainda não configurada"})
+                return
+            try:
+                self._responder_json(200, {"grupos": evolution_client.listar_grupos(inst)})
+            except evolution_client.EvolutionError as e:
+                # Vira lista vazia + motivo, não erro: a tela cai pro campo de
+                # texto manual quando isto falha (ver index.html).
+                self._responder_json(200, {"grupos": [], "erro": str(e)})
             return
 
         if ROTA_MCPS_CATALOGO.match(self.path):

@@ -916,32 +916,71 @@ async function carregarWhatsapp() {
   }
 
   // Grupo onde o resumo periódico de atendimento deste cliente é mandado
-  // (quem envia é um Schedule Trigger no n8n — aqui só cadastra o destino).
-  // Independente de WhatsApp conectado ou não: o grupo é de quem recebe o
-  // aviso, não do número que atende o paciente.
+  // (quem envia é um Schedule Trigger no n8n, pela instância do agente geral
+  // — aqui só cadastra o destino). Independente de WhatsApp do CLIENTE
+  // conectado ou não: o grupo é de quem recebe o aviso, não de quem atende.
+  const grupoAtual = cli.whatsapp_grupo_aviso || '';
   caixa.innerHTML += `
     <h3 style="margin-top:22px">Resumo periódico de atendimento</h3>
-    <p class="hint">JID do grupo do WhatsApp que recebe o resumo (quantos
-      contatos a IA atendeu hoje/no mês). Vazio = este cliente não entra no
-      envio.</p>
-    <div class="linha" style="gap:8px">
-      <input type="text" id="grupo-aviso" placeholder="120363...@g.us"
-             value="${escaparHtml(cli.whatsapp_grupo_aviso || '')}" style="flex:1">
-      <button type="button" class="handoff-botao" id="btn-salvar-grupo">Salvar</button>
-    </div>`;
+    <p class="hint">Grupo do WhatsApp que recebe o resumo (quantos contatos a
+      IA atendeu hoje/no mês). Precisa que o número do agente geral
+      (a5-central) já esteja ADICIONADO no grupo — é ele quem manda a
+      mensagem. Vazio = este cliente não entra no envio.</p>
+    <div id="grupo-aviso-area">carregando grupos…</div>`;
 
-  document.getElementById('btn-salvar-grupo').addEventListener('click', async (ev) => {
-    const b = ev.target; b.disabled = true;
-    const grupo = document.getElementById('grupo-aviso').value.trim();
-    await fetch(`/clientes/${clienteAtualId}/grupo-aviso`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grupo }),
+  (async () => {
+    const area = document.getElementById('grupo-aviso-area');
+    let g;
+    try { g = await (await fetch('/geral/grupos')).json(); }
+    catch (e) { g = { grupos: [], erro: 'falha ao consultar' }; }
+
+    const grupos = g.grupos || [];
+    // achou na lista: oferece select; senão (lista vazia, erro, ou o valor
+    // salvo não bate com nenhum grupo atual) cai pro campo manual — sem isso,
+    // um erro na Evolution travaria o cadastro do grupo também.
+    const bateComLista = grupos.some(x => x.id === grupoAtual);
+    const usarSelect = grupos.length > 0 && (!grupoAtual || bateComLista);
+
+    area.innerHTML = `
+      ${g.erro ? `<p class="hint">Não consegui listar os grupos automaticamente (${escaparHtml(g.erro)}) — cole o JID manualmente.</p>` : ''}
+      <div class="linha" style="gap:8px">
+        ${usarSelect ? `
+          <select id="grupo-aviso-select" style="flex:1">
+            <option value="">— nenhum —</option>
+            ${grupos.map(x => `<option value="${escaparHtml(x.id)}" ${x.id === grupoAtual ? 'selected' : ''}>${escaparHtml(x.nome)}</option>`).join('')}
+            <option value="__manual__">(colar JID manualmente)</option>
+          </select>
+        ` : ''}
+        <input type="text" id="grupo-aviso" placeholder="120363...@g.us"
+               value="${escaparHtml(grupoAtual)}"
+               style="flex:1; ${usarSelect ? 'display:none' : ''}">
+        <button type="button" class="handoff-botao" id="btn-salvar-grupo">Salvar</button>
+      </div>`;
+
+    if (usarSelect) {
+      document.getElementById('grupo-aviso-select').addEventListener('change', (ev) => {
+        const manual = document.getElementById('grupo-aviso');
+        if (ev.target.value === '__manual__') {
+          manual.style.display = ''; manual.value = ''; manual.focus();
+        } else {
+          manual.style.display = 'none'; manual.value = ev.target.value;
+        }
+      });
+    }
+
+    document.getElementById('btn-salvar-grupo').addEventListener('click', async (ev) => {
+      const b = ev.target; b.disabled = true;
+      const grupo = document.getElementById('grupo-aviso').value.trim();
+      await fetch(`/clientes/${clienteAtualId}/grupo-aviso`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grupo }),
+      });
+      b.disabled = false;
+      b.textContent = 'Salvo';
+      setTimeout(() => { b.textContent = 'Salvar'; }, 1500);
+      carregarLogs();
     });
-    b.disabled = false;
-    b.textContent = 'Salvo';
-    setTimeout(() => { b.textContent = 'Salvar'; }, 1500);
-    carregarLogs();
-  });
+  })();
 
   document.getElementById('btn-liga-agente').addEventListener('click', async (ev) => {
     const b = ev.target; b.disabled = true;
