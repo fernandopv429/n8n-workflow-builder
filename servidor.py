@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Backend web da ferramenta de clonagem de agente de IA no n8n.
+"""Backend web do painel de gerenciamento de agentes de IA (A5 Ecossistema).
 
     python3 servidor.py                 # sobe em 0.0.0.0:8099
     python3 servidor.py --porta 9001
 
 Biblioteca padrão só (mesmo padrão de catalogo-brtw/servidor_pagamento.py —
-sem framework). Fluxo (Fase 2 do plano):
+sem framework). Fluxo:
 
     GET  /saude                     liveness/readiness — ÚNICA rota sem auth
     GET  /                        index.html
@@ -14,11 +14,13 @@ sem framework). Fluxo (Fase 2 do plano):
     POST /clientes                  cria cliente "rascunho" (passo 1: nome+nicho)
     GET  /clientes/<id>              detalhe de um cliente
     GET  /clientes/<id>/logs          últimas entradas de log desse cliente
-    PUT  /clientes/<id>/credenciais    grava Kommo + chave OpenAI e dispara a
-                                       clonagem real no n8n (ou só simula, com
-                                       dry_run) — a credencial OpenAI é CRIADA
-                                       no n8n nesse passo, não selecionada de
-                                       uma lista.
+    PUT  /clientes/<id>/credenciais    grava Kommo + chave OpenAI e marca o
+                                       cliente ativo — a credencial OpenAI é
+                                       CRIADA aqui (projeto próprio), não
+                                       selecionada de uma lista. Desde
+                                       15/10/2026 não existe mais clone de
+                                       workflow no n8n: o worker_agente.py lê
+                                       tudo direto do Postgres.
     GET  /clientes/<id>/mensagens      histórico do chat
     POST /clientes/<id>/chat           manda mensagem pro chat (agente_chat.py)
 
@@ -55,10 +57,8 @@ import pocketbase_client  # noqa: E402
 import cloner  # noqa: E402
 import cofre  # noqa: E402
 import evolution_client  # noqa: E402
-from cloner import ClonagemInvalida, clonar  # noqa: E402
 from config import carregar_env  # noqa: E402
-from manifest import ClienteManifest  # noqa: E402
-from n8n_client import N8nClient, N8nError  # noqa: E402
+from n8n_client import N8nClient  # noqa: E402
 from templates_nicho import NICHOS  # noqa: E402
 
 ENV = carregar_env()
@@ -650,35 +650,6 @@ class Handler(BaseHTTPRequestHandler):
         cliente_id = db.criar_cliente_rascunho(cliente_nome, nicho, workflow_origem_id)
         self._responder_json(200, _com_imagem(db.obter_cliente(cliente_id)))
 
-    def _atualizar_cliente_clonado(self, cliente_id: int, cliente: dict, corpo: dict):
-        """Atualiza as credenciais do Kommo no workflow que já existe. A chave da
-        OpenAI não é reaproveitada aqui: a credencial no n8n já foi criada na
-        clonagem, e trocá-la exigiria criar outra (sobra credencial órfã)."""
-        workflow_id = cliente["workflow_novo_id"]
-        alterados = []
-        try:
-            for campo, chave_corpo in (("base-url", "kommo_subdominio"), ("kommo-token", "kommo_token")):
-                valor = str(corpo.get(chave_corpo, "")).strip()
-                if valor and valor != n8n_edicao.ler_campo_database(workflow_id, campo):
-                    n8n_edicao.atualizar_campo_database(workflow_id, campo, valor)
-                    alterados.append(campo)
-        except Exception as e:  # noqa: BLE001
-            db.registrar_log(cliente_id, "erro", f"Falha ao atualizar credenciais: {e}")
-            self._responder_json(502, {"error": f"falha ao atualizar: {e}"})
-            return
-
-        if alterados:
-            db.registrar_log(cliente_id, "sistema", f"Credenciais atualizadas no workflow existente: {', '.join(alterados)}.")
-        else:
-            db.registrar_log(cliente_id, "sistema", "Nada a atualizar — as credenciais enviadas já são as do workflow.")
-
-        self._responder_json(200, {
-            "dry_run": False,
-            "workflow_id": workflow_id,
-            "atualizado": True,
-            "campos_alterados": alterados,
-        })
-
     def _aplicar_prompt_sugerido(self, cliente_id: int):
         """Aplica no agente o prompt vindo do briefing. Necessário quando o
         lote da Batch API só termina DEPOIS da clonagem — nesse caso o agente
@@ -980,17 +951,9 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(400, {"error": "JSON inválido"})
             return
 
-        # Padrão FALSE desde 07/10/2026, quando a caixa "Modo teste" saiu da
-        # tela a pedido do Fernando. Era True porque a tela sempre mandava o
-        # valor; sem a caixa, manter True faria toda clonagem virar simulação e
-        # nada ser criado — com o painel dizendo "concluído". O parâmetro
-        # continua aceito pra quem chamar a API direto e quiser simular.
-        dry_run = bool(corpo.get("dry_run", False))
-        forcar_novo = bool(corpo.get("forcar_novo", False))
-
         # Conexão com o Kommo é testada ANTES de gravar qualquer coisa: com
-        # token errado o agente é criado, o painel diz "sucesso" e a falha só
-        # aparece quando um paciente manda mensagem. Só leitura (lista funis).
+        # token errado o worker atenderia achando que a credencial vale, e a
+        # falha só apareceria quando chegasse mensagem de paciente de verdade.
         subdominio = str(corpo.get("kommo_subdominio", "")).strip()
         token = str(corpo.get("kommo_token", "")).strip()
         if subdominio and token:
@@ -1012,53 +975,27 @@ class Handler(BaseHTTPRequestHandler):
                 + (f" ({funis} funis na conta)." if funis is not None else "."),
             )
 
-        # Cliente já clonado: por padrão ATUALIZA o workflow existente em vez de
-        # clonar de novo. Sem isso, clicar "Salvar e clonar" duas vezes cria um
-        # segundo workflow que colide no path do webhook contra o primeiro — foi
-        # o que gerou 7 órfãos e uma sequência de 409 no 'Will teste'
-        # (21/09/2026). Quem quiser mesmo um segundo agente marca `forcar_novo`.
-        ja_tem_agente = cliente["status"] == "clonado" and cliente["workflow_novo_id"]
-        if ja_tem_agente and not forcar_novo:
-            self._atualizar_cliente_clonado(cliente_id, cliente, corpo)
-            return
-        if ja_tem_agente and forcar_novo and not dry_run:
-            db.registrar_log(
-                cliente_id, "sistema",
-                f"Criando agente NOVO a pedido — o anterior ({cliente['workflow_novo_id']}) "
-                "continua no n8n e deixa de ser o agente deste cliente no painel.",
-            )
-
-        # Sem chave digitada, cria um projeto próprio do cliente na OpenAI e
-        # tira a chave de lá. Além de poupar o passo manual, é o que torna o
-        # custo rastreável: hoje tudo cai num projeto só e não dá pra saber
-        # quanto cada cliente consome. Em dry_run não cria nada.
+        # Sem chave digitada e sem projeto ainda, cria um projeto próprio do
+        # cliente na OpenAI e tira a chave de lá — é o que torna o custo
+        # rastreável por cliente (ver _cliente_openai em worker_agente.py).
+        # Já tendo projeto, não mexe: trocar a chave aqui invalidaria a antiga
+        # sem motivo.
         chave_openai = corpo.get("openai_api_key", "").strip()
-        projeto_openai = ""
-        if not chave_openai and not openai_admin.disponivel():
-            self._responder_json(400, {"error":
-                "preencha a chave da OpenAI — a criação automática exige a variável "
-                "OPENAI_ADMIN_KEY configurada no servidor."})
-            return
-        if not chave_openai and dry_run:
-            # dry-run não cria nada em lugar nenhum, nem projeto na OpenAI; o
-            # manifesto só precisa de um valor pra passar na validação, e o
-            # cloner já reporta a credencial como "SERIA criada".
-            chave_openai = "(chave seria criada na OpenAI)"
-        elif not chave_openai and openai_admin.disponivel():
+        if not chave_openai and not cliente.get("openai_projeto_id"):
+            if not openai_admin.disponivel():
+                self._responder_json(400, {"error":
+                    "preencha a chave da OpenAI — a criação automática exige a variável "
+                    "OPENAI_ADMIN_KEY configurada no servidor."})
+                return
             try:
                 criado = openai_admin.criar_projeto_e_chave(cliente["cliente_nome"])
             except openai_admin.OpenAiAdminError as e:
                 db.registrar_log(cliente_id, "erro", f"OpenAI Admin API: {e}")
                 self._responder_json(502, {"error": f"não consegui criar a chave da OpenAI: {e}"})
                 return
-            chave_openai = criado["api_key"]
-            projeto_openai = criado["projeto_id"]
-            # grava ANTES de clonar: se a clonagem falhar depois disso, o
-            # projeto já está vinculado ao cliente e some junto quando ele for
-            # excluído — senão ficaria órfão na OpenAI, com chave válida.
             db.definir_projeto_openai(
-                cliente_id, projeto_openai,
-                cofre.cifrar(chave_openai) if cofre.disponivel() else "")
+                cliente_id, criado["projeto_id"],
+                cofre.cifrar(criado["api_key"]) if cofre.disponivel() else "")
             if not cofre.disponivel():
                 db.registrar_log(
                     cliente_id, "erro",
@@ -1067,63 +1004,17 @@ class Handler(BaseHTTPRequestHandler):
                     "dele não aparecerá separado.")
             db.registrar_log(
                 cliente_id, "sistema",
-                f"Projeto '{criado['projeto_nome']}' criado na OpenAI ({projeto_openai}) "
+                f"Projeto '{criado['projeto_nome']}' criado na OpenAI ({criado['projeto_id']}) "
                 "com chave própria — o consumo deste cliente passa a ser medido separado.",
             )
+        elif chave_openai:
+            # Chave colada à mão: guarda sem projeto rastreado (comportamento
+            # antigo, pra quem quiser reaproveitar uma chave que já existe).
+            db.definir_projeto_openai(
+                cliente_id, "", cofre.cifrar(chave_openai) if cofre.disponivel() else "")
 
-        dados_manifesto = {
-            "cliente_nome": cliente["cliente_nome"],
-            "nicho": cliente["nicho"],
-            "workflow_origem_id": cliente["workflow_origem_id"],
-            "kommo_subdominio": corpo.get("kommo_subdominio", ""),
-            "kommo_token": corpo.get("kommo_token", ""),
-            "openai_api_key": chave_openai,
-        }
-        try:
-            manifesto = ClienteManifest.de_dict(dados_manifesto)
-        except ValueError as e:
-            self._responder_json(400, {"error": str(e)})
-            return
-
-        try:
-            # O prompt gerado a partir do briefing entra AQUI — senão o clone
-            # sobe com a persona do template (ver _aplicar_prompt no cloner).
-            resultado = clonar(manifesto, dry_run=dry_run, prompt_briefing=cliente.get("prompt_sugerido") or "")
-        except ClonagemInvalida as e:
-            if not dry_run:
-                db.marcar_cliente_erro(cliente_id, str(e))
-            self._responder_json(422, {"error": str(e)})
-            return
-        except N8nError as e:
-            if not dry_run:
-                db.marcar_cliente_erro(cliente_id, f"n8n: {e}")
-            self._responder_json(502, {"error": f"n8n: {e}"})
-            return
-        except Exception as e:  # noqa: BLE001 — devolve pro form em vez de derrubar o processo
-            if not dry_run:
-                db.marcar_cliente_erro(cliente_id, f"erro inesperado: {e}")
-            self._responder_json(500, {"error": f"erro inesperado: {e}"})
-            return
-
-        # Detalhe técnico (nodes, sub-workflows, credencial criada) só aparece
-        # nos logs — a resposta pro form fica só com um resumo, sem payload.
-        if dry_run:
-            db.registrar_log(
-                cliente_id, "sistema",
-                f"Dry-run: '{resultado['payload']['name']}' seria criado "
-                f"({len(resultado['payload']['nodes'])} nodes) — nada foi criado no n8n.",
-            )
-            for aviso in resultado.get("avisos", []):
-                db.registrar_log(cliente_id, "tool_call", aviso)
-        else:
-            for aviso in resultado.get("avisos", []):
-                db.registrar_log(cliente_id, "tool_call", aviso)
-            try:
-                db.marcar_cliente_clonado(cliente_id, manifesto, resultado)
-            except Exception as e:  # noqa: BLE001 — clone no n8n já aconteceu; não falhar a resposta por causa do registro
-                db.registrar_log(cliente_id, "erro", f"Clonado no n8n, mas falhou ao registrar no histórico: {e}")
-
-        self._responder_json(200, {"dry_run": dry_run, "workflow_id": resultado.get("workflow_id")})
+        db.marcar_cliente_ativo(cliente_id)
+        self._responder_json(200, {"ativo": True})
 
 
 def main():

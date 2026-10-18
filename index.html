@@ -64,7 +64,7 @@
   .cliente-card h3 { margin: 0 0 4px; font-size: 15px; }
   .cliente-card .nicho { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
   .cliente-card .status { display: inline-block; margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-  .cliente-card .status.clonado { color: var(--text); border-color: #3a3a40; }
+  .cliente-card .status.ativo { color: var(--text); border-color: #3a3a40; }
   .cliente-card .status.erro { color: var(--err); border-color: var(--err); }
   .card-novo {
     border: 1px dashed var(--border); border-radius: 10px; padding: 16px;
@@ -366,7 +366,7 @@
       <h2>Credenciais</h2>
       <button type="button" class="modal-fechar" id="botao-fechar-modal">&times;</button>
     </div>
-    <p class="sub" style="margin-top:4px" id="modal-subtitulo">Salvar aqui cria o agente deste cliente no n8n.</p>
+    <p class="sub" style="margin-top:4px" id="modal-subtitulo">Salvar aqui conecta o Kommo e a OpenAI deste cliente.</p>
 
     <div class="aviso-existente" id="aviso-existente" style="display:none"></div>
 
@@ -389,12 +389,7 @@
           Preencha só se quiser reaproveitar uma chave que já existe.</small>
       </fieldset>
 
-      <div class="linha" id="linha-forcar-novo" style="display:none">
-        <input type="checkbox" id="forcar_novo">
-        <label for="forcar_novo">Criar um agente NOVO em vez de atualizar o que já existe</label>
-      </div>
-
-      <button type="submit" class="principal" id="botao-salvar-credenciais">Salvar e clonar</button>
+      <button type="submit" class="principal" id="botao-salvar-credenciais">Salvar</button>
     </form>
 
     <div id="resultado-credenciais"></div>
@@ -601,7 +596,7 @@ async function carregarClientes() {
     const vazio = document.createElement('div');
     vazio.className = 'vazio';
     vazio.style.gridColumn = '1 / -1';
-    vazio.textContent = 'Nenhum cliente clonado ainda.';
+    vazio.textContent = 'Nenhum cliente cadastrado ainda.';
     grid.prepend(vazio);
   }
 }
@@ -650,7 +645,7 @@ let clienteParaExcluir = null;
 function abrirConfirmacaoExclusao(cliente) {
   clienteParaExcluir = cliente;
   const detalhe = document.getElementById('excluir-detalhe');
-  const temAgente = cliente.status === 'clonado' && cliente.workflow_novo_id;
+  const temAgente = !!cliente.workflow_novo_id;  // resquício de cliente antigo, não clonado mais
   detalhe.innerHTML = `
     <strong>${escaparHtml(cliente.cliente_nome)}</strong><br>
     ${temAgente
@@ -1384,9 +1379,14 @@ async function carregarChat() {
   const area = document.getElementById('chat-area');
 
   const cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
-  if (cliente.status !== 'clonado') {
+  // Este chat edita o workflow CLONADO no n8n (n8n_edicao.py) — clientes
+  // novos não têm mais clone (worker_agente.py lê tudo do Postgres), então
+  // ele só continua liberado pra quem ainda tem um workflow_novo_id de
+  // antes da migração (ver conversa com o Fernando, 15/10/2026: fluxo de
+  // chat pra cliente novo ficou como pendência separada).
+  if (!cliente.workflow_novo_id) {
     area.className = 'chat-area vazio';
-    area.textContent = 'Configure as credenciais na engrenagem pra liberar o chat.';
+    area.textContent = 'Este chat edita o agente no n8n — não disponível pra clientes sem clone (ver pendência).';
     input.disabled = true;
     botao.disabled = true;
     emLote.disabled = true;
@@ -1538,12 +1538,7 @@ document.getElementById('chat-input').addEventListener('keydown', (ev) => {
 
 async function prepararModalCredenciais() {
   const aviso = document.getElementById('aviso-existente');
-  const linhaForcar = document.getElementById('linha-forcar-novo');
   const subtitulo = document.getElementById('modal-subtitulo');
-  const botao = document.getElementById('botao-salvar-credenciais');
-  const checkForcar = document.getElementById('forcar_novo');
-
-  checkForcar.checked = false;
 
   let cliente;
   try {
@@ -1552,40 +1547,15 @@ async function prepararModalCredenciais() {
     return;
   }
 
-  const jaTemAgente = cliente.status === 'clonado' && cliente.workflow_novo_id;
-
-  if (!jaTemAgente) {
+  if (cliente.status === 'ativo') {
+    aviso.style.display = 'block';
+    aviso.innerHTML = '<strong>Este cliente já está ativo.</strong> Salvar aqui atualiza as credenciais.';
+    subtitulo.textContent = 'Atualize o Kommo e/ou a OpenAI deste cliente.';
+  } else {
     aviso.style.display = 'none';
-    linhaForcar.style.display = 'none';
-    subtitulo.textContent = 'Salvar aqui cria o agente deste cliente no n8n.';
-    atualizarRotuloBotaoCredenciais();
-    return;
+    subtitulo.textContent = 'Salvar aqui conecta o Kommo e a OpenAI deste cliente.';
   }
-
-  aviso.style.display = 'block';
-  aviso.innerHTML = `
-    <strong>Este cliente já tem um agente no n8n.</strong><br>
-    <a href="${cliente.workflow_novo_url}" target="_blank">${escaparHtml(cliente.workflow_novo_id)}</a> — em funcionamento.
-    Salvar aqui vai <strong>atualizar as credenciais dele</strong>, sem criar nada novo.`;
-  linhaForcar.style.display = 'flex';
-  subtitulo.textContent = 'Atualize as credenciais do agente existente, ou marque abaixo pra criar outro.';
-  atualizarRotuloBotaoCredenciais();
 }
-
-function atualizarRotuloBotaoCredenciais() {
-  const botao = document.getElementById('botao-salvar-credenciais');
-  const linhaForcar = document.getElementById('linha-forcar-novo');
-  const forcar = document.getElementById('forcar_novo').checked;
-  const temAgente = linhaForcar.style.display !== 'none';
-
-  if (!temAgente) botao.textContent = 'Salvar e clonar';
-  else if (forcar) botao.textContent = 'Criar agente novo';
-  else botao.textContent = 'Atualizar credenciais';
-}
-
-document.getElementById('forcar_novo').addEventListener('change', () => {
-  atualizarRotuloBotaoCredenciais();
-});
 
 document.getElementById('botao-engrenagem').addEventListener('click', async () => {
   document.getElementById('resultado-credenciais').innerHTML = '';
@@ -1598,21 +1568,9 @@ document.getElementById('botao-fechar-modal').addEventListener('click', () => {
 
 function renderizarResultadoCredenciais(resultado, ok) {
   const div = document.getElementById('resultado-credenciais');
-
-  if (!ok) {
-    div.innerHTML = `<div class="card err">${resultado.error}</div>`;
-    return;
-  }
-
-  let mensagem;
-  if (resultado.atualizado) {
-    mensagem = resultado.campos_alterados && resultado.campos_alterados.length
-      ? `Credenciais atualizadas no agente existente (${resultado.campos_alterados.join(', ')}).`
-      : 'Nada a atualizar — as credenciais enviadas já são as que estão no agente.';
-  } else {
-    mensagem = 'Agente criado no n8n. Detalhes nos logs.';
-  }
-  div.innerHTML = `<div class="card ok">${mensagem}</div>`;
+  div.innerHTML = ok
+    ? `<div class="card ok">Credenciais salvas — cliente ativo.</div>`
+    : `<div class="card err">${resultado.error}</div>`;
 }
 
 document.getElementById('form-credenciais').addEventListener('submit', async (ev) => {
@@ -1626,7 +1584,6 @@ document.getElementById('form-credenciais').addEventListener('submit', async (ev
     kommo_subdominio: document.getElementById('kommo_subdominio').value,
     kommo_token: document.getElementById('kommo_token').value,
     openai_api_key: document.getElementById('openai_api_key').value,
-    forcar_novo: document.getElementById('forcar_novo').checked,
   };
 
   try {
@@ -1645,7 +1602,7 @@ document.getElementById('form-credenciais').addEventListener('submit', async (ev
     renderizarResultadoCredenciais({ error: String(e) }, false);
   } finally {
     botao.disabled = false;
-    botao.textContent = 'Salvar e clonar';
+    botao.textContent = 'Salvar';
   }
 });
 

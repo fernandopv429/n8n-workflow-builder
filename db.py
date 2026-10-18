@@ -33,7 +33,7 @@ def garantir_schema():
                 nicho TEXT NOT NULL,
                 workflow_origem_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'rascunho'
-                    CHECK (status IN ('rascunho', 'clonado', 'erro')),
+                    CHECK (status IN ('rascunho', 'ativo', 'erro')),
                 workflow_novo_id TEXT,
                 workflow_novo_url TEXT,
                 manifesto JSONB,
@@ -91,6 +91,22 @@ def garantir_schema():
         # alguém cadastrar — sem grupo configurado, o cliente simplesmente não
         # entra no envio (ver resumo_atendimento em servidor.py).
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS whatsapp_grupo_aviso TEXT")
+        # Migração 15/10/2026 (pedido do Fernando): o desenho de clonar um
+        # workflow por cliente no n8n foi substituído pelo worker central
+        # (worker_agente.py), que lê prompt/Kommo/OpenAI direto do Postgres —
+        # não existe mais "clone" nenhum. Clientes que ficaram com
+        # status='clonado' do desenho antigo viram 'ativo'; os workflows deles
+        # no n8n foram apagados à parte, então workflow_novo_id/url não
+        # apontam mais pra nada e são zerados junto.
+        conn.execute(
+            "UPDATE clientes SET status = 'ativo', workflow_novo_id = NULL, "
+            "workflow_novo_url = NULL WHERE status = 'clonado'"
+        )
+        conn.execute("ALTER TABLE clientes DROP CONSTRAINT IF EXISTS clientes_status_check")
+        conn.execute(
+            "ALTER TABLE clientes ADD CONSTRAINT clientes_status_check "
+            "CHECK (status IN ('rascunho', 'ativo', 'erro'))"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -563,30 +579,15 @@ def listar_clientes() -> list:
         return [_linha_para_cliente(cur, r) for r in cur.fetchall()]
 
 
-def marcar_cliente_clonado(cliente_id: int, manifesto, resultado: dict):
-    """Só chamar depois de um clone REAL bem-sucedido (dry_run=False)."""
-    manifesto_seguro = {
-        k: v for k, v in vars(manifesto).items()
-        # segredos — ficam só no workflow/credencial do n8n, nunca duplicados aqui
-        if k not in ("kommo_token", "openai_api_key")
-    }
+def marcar_cliente_ativo(cliente_id: int):
+    """Cliente pronto pra atender — sem clone no n8n, o worker_agente.py lê
+    prompt/Kommo/OpenAI direto do Postgres a partir daqui."""
     with _conectar() as conn:
         conn.execute(
-            """
-            UPDATE clientes
-            SET status = 'clonado', workflow_novo_id = %s, workflow_novo_url = %s,
-                manifesto = %s, avisos = %s, atualizado_em = now()
-            WHERE id = %s
-            """,
-            (
-                resultado["workflow_id"],
-                resultado["workflow_url"],
-                json.dumps(manifesto_seguro),
-                json.dumps(resultado.get("avisos", [])),
-                cliente_id,
-            ),
+            "UPDATE clientes SET status = 'ativo', atualizado_em = now() WHERE id = %s",
+            (cliente_id,),
         )
-    registrar_log(cliente_id, "sistema", f"Clonado com sucesso: {resultado['workflow_id']}.")
+    registrar_log(cliente_id, "sistema", "Credenciais salvas — cliente ativo.")
 
 
 def marcar_cliente_erro(cliente_id: int, erro: str):
