@@ -1379,14 +1379,9 @@ async function carregarChat() {
   const area = document.getElementById('chat-area');
 
   const cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
-  // Este chat edita o workflow CLONADO no n8n (n8n_edicao.py) — clientes
-  // novos não têm mais clone (worker_agente.py lê tudo do Postgres), então
-  // ele só continua liberado pra quem ainda tem um workflow_novo_id de
-  // antes da migração (ver conversa com o Fernando, 15/10/2026: fluxo de
-  // chat pra cliente novo ficou como pendência separada).
-  if (!cliente.workflow_novo_id) {
+  if (cliente.status !== 'ativo') {
     area.className = 'chat-area vazio';
-    area.textContent = 'Este chat edita o agente no n8n — não disponível pra clientes sem clone (ver pendência).';
+    area.textContent = 'Configure as credenciais na engrenagem pra liberar o chat.';
     input.disabled = true;
     botao.disabled = true;
     emLote.disabled = true;
