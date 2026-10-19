@@ -98,11 +98,16 @@ def garantir_schema():
         # status='clonado' do desenho antigo viram 'ativo'; os workflows deles
         # no n8n foram apagados à parte, então workflow_novo_id/url não
         # apontam mais pra nada e são zerados junto.
+        # A constraint velha só aceitava 'clonado', não 'ativo' — precisa cair
+        # ANTES do UPDATE, senão o Postgres rejeita a troca de valor (e, como
+        # tudo aqui roda numa transação só, a migração inteira falha calada:
+        # o garantir_schema() captura a exceção pra não derrubar o container,
+        # e nem a coluna whatsapp_grupo_aviso chega a ser criada).
+        conn.execute("ALTER TABLE clientes DROP CONSTRAINT IF EXISTS clientes_status_check")
         conn.execute(
             "UPDATE clientes SET status = 'ativo', workflow_novo_id = NULL, "
             "workflow_novo_url = NULL WHERE status = 'clonado'"
         )
-        conn.execute("ALTER TABLE clientes DROP CONSTRAINT IF EXISTS clientes_status_check")
         conn.execute(
             "ALTER TABLE clientes ADD CONSTRAINT clientes_status_check "
             "CHECK (status IN ('rascunho', 'ativo', 'erro'))"
