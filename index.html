@@ -1130,13 +1130,13 @@ async function carregarFerramentas() {
     const bloqueado = !l && outros.length;
     return `<tr${bloqueado ? ' style="opacity:.45"' : ''}>
       <td><input type="checkbox" class="mcp-liga" data-path="${escaparHtml(c.path)}"
-                 data-nome="${escaparHtml(c.nome)}" ${marcado}
-                 ${bloqueado ? 'disabled' : ''}></td>
+                 data-nome="${escaparHtml(c.nome)}" data-outros="${escaparHtml(outros.join(', '))}"
+                 ${marcado}></td>
       <td>${escaparHtml(c.nome)}<br><small class="hint">${escaparHtml(c.path)}</small></td>
       <td style="text-align:center">
         <input type="checkbox" class="mcp-atend" data-path="${escaparHtml(c.path)}" ${atend}
                ${l ? '' : 'disabled'}></td>
-      <td>${bloqueado ? `<span class="opcional">de ${escaparHtml(outros.join(', '))}</span>` : ''}
+      <td>${bloqueado ? `<span class="opcional">também usado por ${escaparHtml(outros.join(', '))} — marcar pede confirmação</span>` : ''}
           ${c.ativo ? '' : '<span class="opcional">inativo no n8n</span>'}
           ${c.autenticado ? '' : '<span class="opcional">sem autenticação</span>'}</td>
     </tr>`;
@@ -1188,7 +1188,7 @@ async function carregarFerramentas() {
     carregarFerramentas();
   });
 
-  async function salvar(path, nome, ligar, atendimento) {
+  async function salvar(path, nome, ligar, atendimento, compartilhada) {
     const aviso = document.getElementById('ferramentas-aviso');
     aviso.textContent = 'salvando…';
     if (!ligar) {
@@ -1202,7 +1202,7 @@ async function carregarFerramentas() {
         path.replace(/[^a-z0-9]+/gi, '_').slice(0, 20);
       const resp = await fetch(`/clientes/${clienteAtualId}/mcps`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apelido, path, no_atendimento: atendimento }),
+        body: JSON.stringify({ apelido, path, no_atendimento: atendimento, compartilhada: !!compartilhada }),
       });
       const r = await resp.json();
       aviso.textContent = resp.ok
@@ -1215,8 +1215,21 @@ async function carregarFerramentas() {
 
   caixa.querySelectorAll('.mcp-liga').forEach(c => c.addEventListener('change', ev => {
     const p = ev.target.dataset.path;
+    const outros = ev.target.dataset.outros;
+    // Bloqueado = já usado por outro cliente. Em vez de travar pra sempre
+    // (MCP multi-tenant, tipo o do Kommo, nunca poderia ser ligado em
+    // ninguém além do primeiro), pede confirmação explícita aqui.
+    if (ev.target.checked && outros) {
+      const ok = confirm(
+        `"${ev.target.dataset.nome}" já é usado por ${outros}. Ligar aqui também só é seguro `
+        + "se essa ferramenta injeta a credencial de CADA cliente na hora da chamada (como o "
+        + "MCP do Kommo) — nunca se a credencial mora fixa dentro do MCP. Confirma que é esse "
+        + "o caso?");
+      if (!ok) { ev.target.checked = false; return; }
+    }
     salvar(p, ev.target.dataset.nome, ev.target.checked,
-           (caixa.querySelector(`.mcp-atend[data-path="${p}"]`) || {}).checked || false);
+           (caixa.querySelector(`.mcp-atend[data-path="${p}"]`) || {}).checked || false,
+           !!outros);
   }));
   caixa.querySelectorAll('.mcp-atend').forEach(c => c.addEventListener('change', ev => {
     const p = ev.target.dataset.path;
