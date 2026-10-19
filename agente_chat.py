@@ -1,12 +1,17 @@
-"""Loop de tool-calling do chat da tela de gerenciamento. Único ponto que
-combina as duas famílias de ferramentas:
+"""Loop de tool-calling do chat da tela de gerenciamento. Duas frentes:
 
-1. n8n_edicao.py — ler/trocar o prompt do agente principal, ler/trocar campos
-   do node Database. Curado e restrito (ver n8n_edicao.py).
-2. mcp_kommo_client.py — proxy pro MCP do Kommo já hospedado no n8n. O
-   kommo_domain/access_token NUNCA são expostos pro modelo como parâmetro —
-   são injetados aqui, lidos do workflow do próprio cliente a cada chamada
-   (nunca guardados no nosso banco).
+1. Prompt do agente — lê/reescreve `clientes.prompt_sugerido` direto no
+   Postgres (é o que worker_agente.py usa pra falar com o paciente).
+2. mcp_kommo_client.py — proxy pro MCP do Kommo já hospedado no n8n, pra
+   estruturar (funil, etapas, campos personalizados) e analisar o CRM do
+   cliente. kommo_domain/access_token NUNCA são expostos pro modelo como
+   parâmetro — são injetados aqui, lidos do Postgres a cada chamada
+   (db.obter_credenciais_kommo).
+
+Até 15/10/2026 este chat também editava o workflow clonado do cliente no n8n
+(nodes, connections, credencial no node Database) — removido junto com o
+clone (ver commit "remove clonagem de workflow no n8n do fluxo de
+credenciais"): não existe mais workflow nenhum pra editar.
 
 Rastreado pelo AgentOps (é a parte genuinamente não-determinística do
 sistema — diferente do prompt_gerador.py, que é uma chamada isolada).
@@ -27,7 +32,6 @@ from openai import OpenAI  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
-import n8n_edicao  # noqa: E402
 
 MODELO = "gpt-4o-mini"
 # Quantas rodadas de tool-call o chat encadeia num turno. 6 era pouco pra tarefa
@@ -37,10 +41,6 @@ MODELO = "gpt-4o-mini"
 # presta contas do que já fez em vez de sumir com o trabalho (ver o fim de
 # processar_mensagem).
 MAX_RODADAS_FERRAMENTA = 40
-
-# só "base-url" fica exposto ao chat — "kommo-token" é segredo, nunca deve
-# aparecer na conversa (chat_mensagens/logs não são criptografados).
-CAMPOS_DATABASE_NO_CHAT = ("base-url",)
 
 _inicializado = False
 
@@ -57,7 +57,7 @@ def _garantir_agentops():
     _inicializado = True
 
 
-def _ferramentas_n8n() -> list:
+def _ferramentas_prompt() -> list:
     return [
         {
             "type": "function",
@@ -76,135 +76,6 @@ def _ferramentas_n8n() -> list:
                     "type": "object",
                     "properties": {"novo_prompt": {"type": "string", "description": "Texto completo do novo prompt"}},
                     "required": ["novo_prompt"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ler_campo_database",
-                "description": "Lê um campo do node Database do workflow deste cliente.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"campo": {"type": "string", "enum": list(CAMPOS_DATABASE_NO_CHAT)}},
-                    "required": ["campo"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "atualizar_campo_database",
-                "description": "Atualiza um campo do node Database do workflow deste cliente.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "campo": {"type": "string", "enum": list(CAMPOS_DATABASE_NO_CHAT)},
-                        "valor": {"type": "string"},
-                    },
-                    "required": ["campo", "valor"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "listar_nodes",
-                "description": "Lista o nome e o tipo de todos os nodes do workflow deste cliente — use antes de renomear_node pra confirmar o nome exato.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "renomear_node",
-                "description": (
-                    "Renomeia um node do workflow, atualizando automaticamente conexões e "
-                    "referências de expressão $('NomeAntigo') em outros nodes. Não pode "
-                    "renomear 'AgenteMov' nem 'Database' (nomes fixos usados pelo sistema)."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "nome_atual": {"type": "string"},
-                        "nome_novo": {"type": "string"},
-                    },
-                    "required": ["nome_atual", "nome_novo"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ler_node",
-                "description": "Lê o JSON completo (type, parameters, tudo) de um node específico do workflow.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"nome_node": {"type": "string"}},
-                    "required": ["nome_node"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "atualizar_node",
-                "description": (
-                    "Substitui a definição INTEIRA de um node existente (type, parameters, "
-                    "tudo) pelo JSON fornecido — cobre editar parâmetros internos, mudar o "
-                    "tipo do node, etc. Sem verificação de conteúdo. Backup automático antes."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "nome_node": {"type": "string"},
-                        "novo_node": {"type": "object", "description": "JSON completo do node (mesmo formato do n8n)"},
-                    },
-                    "required": ["nome_node", "novo_node"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "criar_node",
-                "description": "Adiciona um node novo ao workflow (JSON completo, mesmo formato do n8n). Backup automático antes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"node": {"type": "object", "description": "JSON completo do node novo"}},
-                    "required": ["node"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "remover_node",
-                "description": "Remove um node do workflow (e as conexões que apontavam pra ele). Backup automático antes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"nome_node": {"type": "string"}},
-                    "required": ["nome_node"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ler_connections",
-                "description": "Lê o objeto completo de conexões (o 'fiação' entre nodes) do workflow.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "atualizar_connections",
-                "description": "Substitui o objeto de conexões inteiro do workflow — reestrutura o fluxo. Backup automático antes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"connections": {"type": "object", "description": "Objeto connections completo, mesmo formato do n8n"}},
-                    "required": ["connections"],
                 },
             },
         },
@@ -265,23 +136,12 @@ def _system_prompt(cliente: dict) -> str:
         f"'{cliente['cliente_nome']}' (nicho: {cliente['nicho']}) da A5 Ecossistema."
         + _bloco_sugestao(cliente)
         + "\nFerramentas disponíveis:\n"
-        "- ler/reescrever o prompt (system message) do agente principal\n"
-        "- ler/reescrever 'kommo-token' e 'base-url' do node Database\n"
-        "- listar_nodes / ler_node / renomear_node / atualizar_node / criar_node / "
-        "remover_node / ler_connections / atualizar_connections — acesso completo à "
-        "estrutura do workflow (renomear_node já corrige conexões e expressões "
-        "sozinho; as outras exigem você mesmo montar o JSON certo)\n"
-        "- ferramentas do Kommo (leads, funis, etapas, contatos)\n\n"
-        "'AgenteMov' e 'Database' NUNCA podem ser renomeados, editados por "
-        "atualizar_node ou removidos — são nomes fixos dos quais o resto do sistema "
-        "depende pra continuar gerenciando esse cliente.\n\n"
-        "As ferramentas estruturais (atualizar_node, criar_node, remover_node, "
-        "atualizar_connections) NÃO têm verificação automática de conteúdo — "
-        "confirme com o usuário antes de chamar qualquer uma delas, descrevendo "
-        "exatamente o que vai mudar, EXCETO quando o próprio pedido já for uma "
-        "instrução explícita e específica pra fazer a mudança. Sempre que possível, "
-        "leia o node com ler_node antes de reescrevê-lo com atualizar_node, pra não "
-        "perder parâmetros que o usuário não mencionou.\n\n"
+        "- ler/reescrever o prompt (system message) do agente principal — vale a "
+        "partir da próxima mensagem que o paciente mandar, sem precisar de mais "
+        "nenhum passo\n"
+        "- ferramentas do Kommo: estruturar o CRM (criar/editar funil, etapas, "
+        "campos personalizados) e analisar o que já existe (listar leads, "
+        "contatos, funis)\n\n"
         "Se o pedido não corresponder a NENHUMA ferramenta, diga isso claramente — "
         "NUNCA execute uma ferramenta diferente do que foi pedido como substituto e "
         "diga que deu certo (ex: só chamar atualizar_prompt_agente quando o pedido "
@@ -294,7 +154,7 @@ def _system_prompt(cliente: dict) -> str:
         "- Resolva os IDs você mesmo. Se o usuário citar um funil/etapa/lead "
         "pelo NOME, chame kommo_listar_funis (ou o listar correspondente) pra "
         "descobrir o id. Não peça id pro usuário — ele não tem por que saber.\n"
-        "- Peça confirmação só antes de EXCLUIR (funil, etapa, node, conexões). "
+        "- Peça confirmação só antes de EXCLUIR (funil, etapa). "
         "Criar e atualizar você executa direto; ficar pedindo 'confirma?' a cada "
         "passo de uma tarefa simples é ruído.\n"
         "- Se uma chamada falhar, não repita a mesma coisa esperando resultado "
@@ -367,9 +227,6 @@ def _normalizar_args_kommo(args: dict) -> dict:
         else:
             normalizados[chave] = valor
     return normalizados
-
-
-FERRAMENTAS_ESTRUTURAIS = ("atualizar_node", "criar_node", "remover_node", "atualizar_connections")
 
 
 # Etapas que o Kommo marca com is_editable=false e recusa qualquer PATCH/DELETE
@@ -564,62 +421,26 @@ def _guarda_criar_funil(args: dict) -> tuple:
     return {"funil_json": json.dumps(corpo, ensure_ascii=False)}, None
 
 
-def _executar_ferramenta(nome: str, args: dict, workflow_id: str, cliente_id: int) -> str:
+def _executar_ferramenta(nome: str, args: dict, cliente_id: int) -> str:
     try:
-        if nome in FERRAMENTAS_ESTRUTURAIS:
-            # backup do workflow inteiro ANTES da mudança — sem verificação de
-            # conteúdo nessas ferramentas, isso é a única forma de reverter se
-            # a edição quebrar o workflow.
-            backup = n8n_edicao.ler_workflow_completo(workflow_id)
+        if nome == "ler_prompt_agente":
+            cliente = db.obter_cliente(cliente_id)
+            return (cliente.get("prompt_sugerido") or "").strip() or "(ainda não há prompt definido)"
+        if nome == "atualizar_prompt_agente":
+            novo = (args.get("novo_prompt") or "").strip()
+            if not novo:
+                return "erro: o prompt não pode ficar vazio"
+            db.definir_prompt(cliente_id, novo)
             db.registrar_log(
                 cliente_id, "sistema",
-                f"Backup automático do workflow antes de '{nome}' (pra reverter, restaurar este JSON via PUT /api/v1/workflows/{workflow_id}).",
-                detalhe=backup,
-            )
+                f"Prompt alterado pelo chat de gerenciamento ({len(novo)} caracteres). "
+                "Vale a partir da próxima mensagem recebida.")
+            return f"ok: prompt atualizado ({len(novo)} caracteres), vale da próxima mensagem"
 
-        if nome == "ler_node":
-            return json.dumps(n8n_edicao.ler_node(workflow_id, args["nome_node"]), ensure_ascii=False)
-        if nome == "atualizar_node":
-            return json.dumps(
-                n8n_edicao.atualizar_node(workflow_id, args["nome_node"], args["novo_node"]), ensure_ascii=False
-            )
-        if nome == "criar_node":
-            return json.dumps(n8n_edicao.criar_node(workflow_id, args["node"]), ensure_ascii=False)
-        if nome == "remover_node":
-            return json.dumps(n8n_edicao.remover_node(workflow_id, args["nome_node"]), ensure_ascii=False)
-        if nome == "ler_connections":
-            return json.dumps(n8n_edicao.ler_connections(workflow_id), ensure_ascii=False)
-        if nome == "atualizar_connections":
-            return json.dumps(
-                n8n_edicao.atualizar_connections(workflow_id, args["connections"]), ensure_ascii=False
-            )
-
-        if nome == "ler_prompt_agente":
-            return json.dumps(n8n_edicao.ler_prompt_agente(workflow_id), ensure_ascii=False)
-        if nome == "atualizar_prompt_agente":
-            return json.dumps(
-                n8n_edicao.atualizar_prompt_agente(workflow_id, args["novo_prompt"]), ensure_ascii=False
-            )
-        if nome == "ler_campo_database":
-            campo = args.get("campo")
-            if campo not in CAMPOS_DATABASE_NO_CHAT:
-                return f"erro: campo '{campo}' não permitido pelo chat"
-            return n8n_edicao.ler_campo_database(workflow_id, campo)
-        if nome == "atualizar_campo_database":
-            campo = args.get("campo")
-            if campo not in CAMPOS_DATABASE_NO_CHAT:
-                return f"erro: campo '{campo}' não permitido pelo chat"
-            return json.dumps(
-                n8n_edicao.atualizar_campo_database(workflow_id, campo, args["valor"]), ensure_ascii=False
-            )
-        if nome == "listar_nodes":
-            return json.dumps(n8n_edicao.listar_nodes(workflow_id), ensure_ascii=False)
-        if nome == "renomear_node":
-            return json.dumps(
-                n8n_edicao.renomear_node(workflow_id, args["nome_atual"], args["nome_novo"]), ensure_ascii=False
-            )
         if nome.startswith("kommo_"):
-            credenciais = n8n_edicao.credenciais_kommo(db.obter_cliente(cliente_id))
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if not credenciais:
+                return "erro: este cliente ainda não tem credenciais do Kommo salvas (configure na engrenagem)"
             args = _normalizar_args_kommo(args)
             if nome == "kommo_criar_funil":
                 args, erro = _guarda_criar_funil(args)
@@ -674,12 +495,12 @@ def enviar_em_lote(cliente_id: int, texto_usuario: str) -> str:
     """Manda a mensagem pela Batch API em vez de responder na hora: 50% mais
     barato, resposta em minutos a horas. Serve pra pedido de GERAÇÃO (escreva
     o prompt, proponha a estrutura do funil) — sem ferramentas, então não
-    executa nada no n8n nem no Kommo. Devolve o batch_id."""
+    executa nada no Kommo. Devolve o batch_id."""
     cliente = db.obter_cliente(cliente_id)
     if cliente is None:
         raise ValueError("cliente não encontrado")
-    if cliente["status"] != "clonado":
-        raise ValueError("cliente ainda não foi clonado — configure as credenciais primeiro")
+    if cliente["status"] != "ativo":
+        raise ValueError("cliente ainda não está ativo — configure as credenciais primeiro")
 
     db.salvar_mensagem(cliente_id, "user", texto_usuario)
     mensagens = _contexto_conversa(cliente)
@@ -688,8 +509,8 @@ def enviar_em_lote(cliente_id: int, texto_usuario: str) -> str:
         "content": (
             "Este pedido veio em MODO LOTE: você não tem ferramentas disponíveis "
             "nesta resposta. Produza o texto pedido (prompt, proposta, análise). "
-            "Se o pedido exigir executar algo no n8n ou no Kommo, diga que isso "
-            "precisa ser pedido no modo normal do chat."
+            "Se o pedido exigir executar algo no Kommo, diga que isso precisa ser "
+            "pedido no modo normal do chat."
         ),
     })
 
@@ -726,9 +547,8 @@ def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
     cliente = db.obter_cliente(cliente_id)
     if cliente is None:
         raise ValueError("cliente não encontrado")
-    if cliente["status"] != "clonado":
-        raise ValueError("cliente ainda não foi clonado — configure as credenciais primeiro")
-    workflow_id = cliente["workflow_novo_id"]
+    if cliente["status"] != "ativo":
+        raise ValueError("cliente ainda não está ativo — configure as credenciais primeiro")
 
     _garantir_agentops()
     client = OpenAI(api_key=carregar_env()["OPENAI_API_KEY"])
@@ -738,7 +558,7 @@ def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
     mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
     mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in historico if m["role"] in ("user", "assistant")]
 
-    ferramentas = _ferramentas_n8n() + _preparar_ferramentas_kommo()
+    ferramentas = _ferramentas_prompt() + _preparar_ferramentas_kommo()
 
     for _ in range(MAX_RODADAS_FERRAMENTA):
         resposta = client.chat.completions.create(model=MODELO, messages=mensagens, tools=ferramentas)
@@ -756,7 +576,7 @@ def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
         })
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments or "{}")
-            resultado = _executar_ferramenta(tc.function.name, args, workflow_id, cliente_id)
+            resultado = _executar_ferramenta(tc.function.name, args, cliente_id)
             db.registrar_log(
                 cliente_id, "tool_call",
                 f"{tc.function.name}({json.dumps(args, ensure_ascii=False)}) -> {resultado[:200]}",

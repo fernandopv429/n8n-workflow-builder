@@ -64,7 +64,7 @@
   .cliente-card h3 { margin: 0 0 4px; font-size: 15px; }
   .cliente-card .nicho { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
   .cliente-card .status { display: inline-block; margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-  .cliente-card .status.clonado { color: var(--text); border-color: #3a3a40; }
+  .cliente-card .status.ativo { color: var(--text); border-color: #3a3a40; }
   .cliente-card .status.erro { color: var(--err); border-color: var(--err); }
   .card-novo {
     border: 1px dashed var(--border); border-radius: 10px; padding: 16px;
@@ -263,11 +263,6 @@
     <div class="grid" id="grid-clientes"></div>
   </section>
 
-  <section id="tela-geral" class="pagina-larga">
-    <button class="voltar" id="botao-voltar-geral">&larr; voltar</button>
-    <div class="painel-aba" id="geral-conteudo" style="overflow-y:auto"></div>
-  </section>
-
   <section id="tela-passo1">
     <button class="voltar" id="botao-voltar-1">&larr; voltar</button>
 
@@ -287,6 +282,11 @@
   </section>
 
 </main>
+
+<section id="tela-geral" class="pagina-larga">
+  <button class="voltar" id="botao-voltar-geral">&larr; voltar</button>
+  <div class="painel-aba" id="geral-conteudo" style="overflow-y:auto"></div>
+</section>
 
 <section id="tela-gerenciamento" class="pagina-larga">
   <button class="voltar" id="botao-voltar-2">&larr; voltar</button>
@@ -366,7 +366,7 @@
       <h2>Credenciais</h2>
       <button type="button" class="modal-fechar" id="botao-fechar-modal">&times;</button>
     </div>
-    <p class="sub" style="margin-top:4px" id="modal-subtitulo">Salvar aqui cria o agente deste cliente no n8n.</p>
+    <p class="sub" style="margin-top:4px" id="modal-subtitulo">Salvar aqui conecta o Kommo e a OpenAI deste cliente.</p>
 
     <div class="aviso-existente" id="aviso-existente" style="display:none"></div>
 
@@ -389,12 +389,7 @@
           Preencha só se quiser reaproveitar uma chave que já existe.</small>
       </fieldset>
 
-      <div class="linha" id="linha-forcar-novo" style="display:none">
-        <input type="checkbox" id="forcar_novo">
-        <label for="forcar_novo">Criar um agente NOVO em vez de atualizar o que já existe</label>
-      </div>
-
-      <button type="submit" class="principal" id="botao-salvar-credenciais">Salvar e clonar</button>
+      <button type="submit" class="principal" id="botao-salvar-credenciais">Salvar</button>
     </form>
 
     <div id="resultado-credenciais"></div>
@@ -601,7 +596,7 @@ async function carregarClientes() {
     const vazio = document.createElement('div');
     vazio.className = 'vazio';
     vazio.style.gridColumn = '1 / -1';
-    vazio.textContent = 'Nenhum cliente clonado ainda.';
+    vazio.textContent = 'Nenhum cliente cadastrado ainda.';
     grid.prepend(vazio);
   }
 }
@@ -650,7 +645,7 @@ let clienteParaExcluir = null;
 function abrirConfirmacaoExclusao(cliente) {
   clienteParaExcluir = cliente;
   const detalhe = document.getElementById('excluir-detalhe');
-  const temAgente = cliente.status === 'clonado' && cliente.workflow_novo_id;
+  const temAgente = !!cliente.workflow_novo_id;  // resquício de cliente antigo, não clonado mais
   detalhe.innerHTML = `
     <strong>${escaparHtml(cliente.cliente_nome)}</strong><br>
     ${temAgente
@@ -954,9 +949,13 @@ async function abrirGeral() {
 async function carregarGeral() {
   const caixa = document.getElementById('geral-conteudo');
   caixa.innerHTML = 'carregando…';
-  let d;
+  let d, aviso, grupos;
   try { d = await (await fetch('/geral')).json(); }
   catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+  // Grupo e lista de clientes-com-grupo são side-quest: se a Evolution estiver
+  // fora do ar, isso não pode impedir de ver/mexer nos demandantes.
+  try { aviso = await (await fetch('/clientes-aviso')).json(); } catch (e) { aviso = { clientes: [] }; }
+  try { grupos = await (await fetch('/geral/grupos')).json(); } catch (e) { grupos = { grupos: [] }; }
 
   const conectado = d.status === 'open';
   const linhas = (d.demandantes || []).map(x => `
@@ -970,12 +969,26 @@ async function carregarGeral() {
   const opcoes = (d.clientes || []).map(c =>
     `<option value="${c.id}">${escaparHtml(c.nome)}</option>`).join('');
 
+  // Nome do grupo, quando dá pra achar na lista da Evolution — senão mostra o
+  // JID cru (grupo configurado há pouco ou com a instância fora do ar na hora).
+  const nomeDoGrupo = (jid) => (grupos.grupos || []).find(g => g.id === jid)?.nome || jid;
+  const linhasAviso = (aviso.clientes || []).map(c => `
+    <tr>
+      <td>${escaparHtml(c.cliente_nome)}</td>
+      <td>${escaparHtml(nomeDoGrupo(c.grupo))}</td>
+      <td><button type="button" class="handoff-botao tirar-aviso"
+                  data-id="${c.id}">tirar</button></td>
+    </tr>`).join('');
+
+  const opcoesGrupo = (grupos.grupos || []).map(g =>
+    `<option value="${escaparHtml(g.id)}">${escaparHtml(g.nome)}</option>`).join('');
+
   caixa.innerHTML = `
     <div class="consumo-total">${conectado ? 'Conectado' : 'Desconectado'}
       <span class="opcional">${escaparHtml(d.instancia || 'nenhuma instância')}</span></div>
     <button type="button" class="handoff-botao" id="btn-conectar-geral">
       ${conectado ? 'Reapontar o webhook' : 'Conectar (mostrar QR)'}</button>
-    <div id="wpp-qr"></div>
+    <div id="wpp-qr-geral"></div>
 
     <h3 style="margin-top:22px">Quem pode pedir, e por qual cliente</h3>
     <p class="hint">O telefone é a única autorização: quem não estiver nesta lista
@@ -992,11 +1005,43 @@ async function carregarGeral() {
       <select id="dem-cliente">${opcoes}</select>
       <button type="button" class="handoff-botao" id="btn-add-dem">Autorizar</button>
     </div>
-    <div id="geral-aviso" class="opcional"></div>`;
+    <div id="geral-aviso" class="opcional"></div>
+
+    <h3 style="margin-top:22px">Resumo periódico de atendimento, por grupo</h3>
+    <p class="hint">Todo dia o sistema manda, pelo WhatsApp do a5-central, quantos
+      contatos a IA atendeu hoje/no mês — mas só pros clientes com um grupo
+      cadastrado aqui. O a5-central precisa já estar ADICIONADO no grupo do
+      WhatsApp antes de aparecer na lista abaixo.</p>
+    <table class="tabela-consumo">
+      <thead><tr><th>cliente</th><th>grupo</th><th></th></tr></thead>
+      <tbody>${linhasAviso || '<tr><td colspan="3">nenhum cliente com grupo cadastrado ainda.</td></tr>'}</tbody>
+    </table>
+
+    <div class="linha" style="margin-top:14px; gap:8px; flex-wrap:wrap">
+      <select id="aviso-cliente">${opcoes}</select>
+      ${opcoesGrupo ? `
+        <select id="aviso-grupo" style="min-width:220px">${opcoesGrupo}</select>
+      ` : `
+        <input type="text" id="aviso-grupo-manual" placeholder="120363...@g.us (cole o JID)" style="min-width:220px">
+      `}
+      <button type="button" class="handoff-botao" id="btn-salvar-aviso">Cadastrar</button>
+    </div>
+    ${grupos.erro ? `<p class="hint">Não consegui listar os grupos automaticamente (${escaparHtml(grupos.erro)}) — cole o JID manualmente.</p>` : ''}
+    <div id="aviso-status" class="opcional"></div>`;
 
   document.getElementById('btn-conectar-geral').addEventListener('click', async (ev) => {
     const b = ev.target; b.disabled = true; b.textContent = 'aguarde…';
-    const r = await (await fetch('/geral', { method: 'POST' })).json();
+    let r;
+    try {
+      const resp = await fetch('/geral', { method: 'POST' });
+      r = await resp.json();
+    } catch (e) {
+      // resposta não-JSON (proxy devolvendo página de erro, conexão caindo no
+      // meio) não pode travar o botão em "aguarde…" pra sempre — sem isto a
+      // tela ficava parada sem indicar o que houve.
+      b.disabled = false; b.textContent = 'erro ao conectar — tente de novo';
+      return;
+    }
     b.disabled = false;
     if (r.error) { b.textContent = `erro: ${r.error}`; return; }
     if (r.conectada) { carregarGeral(); return; }
@@ -1026,14 +1071,36 @@ async function carregarGeral() {
     });
     carregarGeral();
   }));
+
+  document.getElementById('btn-salvar-aviso').addEventListener('click', async () => {
+    const status = document.getElementById('aviso-status');
+    const clienteId = document.getElementById('aviso-cliente').value;
+    const campoGrupo = document.getElementById('aviso-grupo') || document.getElementById('aviso-grupo-manual');
+    const grupo = (campoGrupo.value || '').trim();
+    if (!grupo) { status.textContent = 'escolha ou cole um grupo.'; return; }
+    await fetch(`/clientes/${clienteId}/grupo-aviso`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grupo }),
+    });
+    carregarGeral();
+  });
+
+  caixa.querySelectorAll('.tirar-aviso').forEach(b => b.addEventListener('click', async ev => {
+    await fetch(`/clientes/${ev.target.dataset.id}/grupo-aviso`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grupo: '' }),
+    });
+    carregarGeral();
+  }));
 }
 
 function mostrarQrGeral(r) {
-  const alvo = document.getElementById('wpp-qr');
+  const alvo = document.getElementById('wpp-qr-geral');
+  if (!alvo) return;
   alvo.innerHTML = r.qr_base64
     ? `<p class="hint">Escaneie com o celular do número da A5 — não com o de um cliente.</p>
        <img src="${r.qr_base64}" alt="QR code" style="max-width:280px;border-radius:8px">`
-    : '<div class="vazio">Sem QR — clique de novo.</div>';
+    : '<div class="vazio">Instância criada, mas sem QR — clique em "Gerar outro QR".</div>';
 }
 
 document.getElementById('botao-geral').addEventListener('click', abrirGeral);
@@ -1063,13 +1130,13 @@ async function carregarFerramentas() {
     const bloqueado = !l && outros.length;
     return `<tr${bloqueado ? ' style="opacity:.45"' : ''}>
       <td><input type="checkbox" class="mcp-liga" data-path="${escaparHtml(c.path)}"
-                 data-nome="${escaparHtml(c.nome)}" ${marcado}
-                 ${bloqueado ? 'disabled' : ''}></td>
+                 data-nome="${escaparHtml(c.nome)}" data-outros="${escaparHtml(outros.join(', '))}"
+                 ${marcado}></td>
       <td>${escaparHtml(c.nome)}<br><small class="hint">${escaparHtml(c.path)}</small></td>
       <td style="text-align:center">
         <input type="checkbox" class="mcp-atend" data-path="${escaparHtml(c.path)}" ${atend}
                ${l ? '' : 'disabled'}></td>
-      <td>${bloqueado ? `<span class="opcional">de ${escaparHtml(outros.join(', '))}</span>` : ''}
+      <td>${bloqueado ? `<span class="opcional">também usado por ${escaparHtml(outros.join(', '))} — marcar pede confirmação</span>` : ''}
           ${c.ativo ? '' : '<span class="opcional">inativo no n8n</span>'}
           ${c.autenticado ? '' : '<span class="opcional">sem autenticação</span>'}</td>
     </tr>`;
@@ -1121,7 +1188,7 @@ async function carregarFerramentas() {
     carregarFerramentas();
   });
 
-  async function salvar(path, nome, ligar, atendimento) {
+  async function salvar(path, nome, ligar, atendimento, compartilhada) {
     const aviso = document.getElementById('ferramentas-aviso');
     aviso.textContent = 'salvando…';
     if (!ligar) {
@@ -1135,7 +1202,7 @@ async function carregarFerramentas() {
         path.replace(/[^a-z0-9]+/gi, '_').slice(0, 20);
       const resp = await fetch(`/clientes/${clienteAtualId}/mcps`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apelido, path, no_atendimento: atendimento }),
+        body: JSON.stringify({ apelido, path, no_atendimento: atendimento, compartilhada: !!compartilhada }),
       });
       const r = await resp.json();
       aviso.textContent = resp.ok
@@ -1148,8 +1215,21 @@ async function carregarFerramentas() {
 
   caixa.querySelectorAll('.mcp-liga').forEach(c => c.addEventListener('change', ev => {
     const p = ev.target.dataset.path;
+    const outros = ev.target.dataset.outros;
+    // Bloqueado = já usado por outro cliente. Em vez de travar pra sempre
+    // (MCP multi-tenant, tipo o do Kommo, nunca poderia ser ligado em
+    // ninguém além do primeiro), pede confirmação explícita aqui.
+    if (ev.target.checked && outros) {
+      const ok = confirm(
+        `"${ev.target.dataset.nome}" já é usado por ${outros}. Ligar aqui também só é seguro `
+        + "se essa ferramenta injeta a credencial de CADA cliente na hora da chamada (como o "
+        + "MCP do Kommo) — nunca se a credencial mora fixa dentro do MCP. Confirma que é esse "
+        + "o caso?");
+      if (!ok) { ev.target.checked = false; return; }
+    }
     salvar(p, ev.target.dataset.nome, ev.target.checked,
-           (caixa.querySelector(`.mcp-atend[data-path="${p}"]`) || {}).checked || false);
+           (caixa.querySelector(`.mcp-atend[data-path="${p}"]`) || {}).checked || false,
+           !!outros);
   }));
   caixa.querySelectorAll('.mcp-atend').forEach(c => c.addEventListener('change', ev => {
     const p = ev.target.dataset.path;
@@ -1312,7 +1392,7 @@ async function carregarChat() {
   const area = document.getElementById('chat-area');
 
   const cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
-  if (cliente.status !== 'clonado') {
+  if (cliente.status !== 'ativo') {
     area.className = 'chat-area vazio';
     area.textContent = 'Configure as credenciais na engrenagem pra liberar o chat.';
     input.disabled = true;
@@ -1466,12 +1546,7 @@ document.getElementById('chat-input').addEventListener('keydown', (ev) => {
 
 async function prepararModalCredenciais() {
   const aviso = document.getElementById('aviso-existente');
-  const linhaForcar = document.getElementById('linha-forcar-novo');
   const subtitulo = document.getElementById('modal-subtitulo');
-  const botao = document.getElementById('botao-salvar-credenciais');
-  const checkForcar = document.getElementById('forcar_novo');
-
-  checkForcar.checked = false;
 
   let cliente;
   try {
@@ -1480,40 +1555,15 @@ async function prepararModalCredenciais() {
     return;
   }
 
-  const jaTemAgente = cliente.status === 'clonado' && cliente.workflow_novo_id;
-
-  if (!jaTemAgente) {
+  if (cliente.status === 'ativo') {
+    aviso.style.display = 'block';
+    aviso.innerHTML = '<strong>Este cliente já está ativo.</strong> Salvar aqui atualiza as credenciais.';
+    subtitulo.textContent = 'Atualize o Kommo e/ou a OpenAI deste cliente.';
+  } else {
     aviso.style.display = 'none';
-    linhaForcar.style.display = 'none';
-    subtitulo.textContent = 'Salvar aqui cria o agente deste cliente no n8n.';
-    atualizarRotuloBotaoCredenciais();
-    return;
+    subtitulo.textContent = 'Salvar aqui conecta o Kommo e a OpenAI deste cliente.';
   }
-
-  aviso.style.display = 'block';
-  aviso.innerHTML = `
-    <strong>Este cliente já tem um agente no n8n.</strong><br>
-    <a href="${cliente.workflow_novo_url}" target="_blank">${escaparHtml(cliente.workflow_novo_id)}</a> — em funcionamento.
-    Salvar aqui vai <strong>atualizar as credenciais dele</strong>, sem criar nada novo.`;
-  linhaForcar.style.display = 'flex';
-  subtitulo.textContent = 'Atualize as credenciais do agente existente, ou marque abaixo pra criar outro.';
-  atualizarRotuloBotaoCredenciais();
 }
-
-function atualizarRotuloBotaoCredenciais() {
-  const botao = document.getElementById('botao-salvar-credenciais');
-  const linhaForcar = document.getElementById('linha-forcar-novo');
-  const forcar = document.getElementById('forcar_novo').checked;
-  const temAgente = linhaForcar.style.display !== 'none';
-
-  if (!temAgente) botao.textContent = 'Salvar e clonar';
-  else if (forcar) botao.textContent = 'Criar agente novo';
-  else botao.textContent = 'Atualizar credenciais';
-}
-
-document.getElementById('forcar_novo').addEventListener('change', () => {
-  atualizarRotuloBotaoCredenciais();
-});
 
 document.getElementById('botao-engrenagem').addEventListener('click', async () => {
   document.getElementById('resultado-credenciais').innerHTML = '';
@@ -1526,21 +1576,9 @@ document.getElementById('botao-fechar-modal').addEventListener('click', () => {
 
 function renderizarResultadoCredenciais(resultado, ok) {
   const div = document.getElementById('resultado-credenciais');
-
-  if (!ok) {
-    div.innerHTML = `<div class="card err">${resultado.error}</div>`;
-    return;
-  }
-
-  let mensagem;
-  if (resultado.atualizado) {
-    mensagem = resultado.campos_alterados && resultado.campos_alterados.length
-      ? `Credenciais atualizadas no agente existente (${resultado.campos_alterados.join(', ')}).`
-      : 'Nada a atualizar — as credenciais enviadas já são as que estão no agente.';
-  } else {
-    mensagem = 'Agente criado no n8n. Detalhes nos logs.';
-  }
-  div.innerHTML = `<div class="card ok">${mensagem}</div>`;
+  div.innerHTML = ok
+    ? `<div class="card ok">Credenciais salvas — cliente ativo.</div>`
+    : `<div class="card err">${resultado.error}</div>`;
 }
 
 document.getElementById('form-credenciais').addEventListener('submit', async (ev) => {
@@ -1554,7 +1592,6 @@ document.getElementById('form-credenciais').addEventListener('submit', async (ev
     kommo_subdominio: document.getElementById('kommo_subdominio').value,
     kommo_token: document.getElementById('kommo_token').value,
     openai_api_key: document.getElementById('openai_api_key').value,
-    forcar_novo: document.getElementById('forcar_novo').checked,
   };
 
   try {
@@ -1573,7 +1610,7 @@ document.getElementById('form-credenciais').addEventListener('submit', async (ev
     renderizarResultadoCredenciais({ error: String(e) }, false);
   } finally {
     botao.disabled = false;
-    botao.textContent = 'Salvar e clonar';
+    botao.textContent = 'Salvar';
   }
 });
 

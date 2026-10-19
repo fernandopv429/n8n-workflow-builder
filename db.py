@@ -33,7 +33,7 @@ def garantir_schema():
                 nicho TEXT NOT NULL,
                 workflow_origem_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'rascunho'
-                    CHECK (status IN ('rascunho', 'clonado', 'erro')),
+                    CHECK (status IN ('rascunho', 'ativo', 'erro')),
                 workflow_novo_id TEXT,
                 workflow_novo_url TEXT,
                 manifesto JSONB,
@@ -85,6 +85,32 @@ def garantir_schema():
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clientes_instancia "
             "ON clientes (evolution_instancia) WHERE evolution_instancia IS NOT NULL"
+        )
+        # Grupo do WhatsApp (JID, ex: 1203630...-...@g.us) onde o resumo
+        # periódico de atendimento deste cliente é mandado. Fica vazio até
+        # alguém cadastrar — sem grupo configurado, o cliente simplesmente não
+        # entra no envio (ver resumo_atendimento em servidor.py).
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS whatsapp_grupo_aviso TEXT")
+        # Migração 15/10/2026 (pedido do Fernando): o desenho de clonar um
+        # workflow por cliente no n8n foi substituído pelo worker central
+        # (worker_agente.py), que lê prompt/Kommo/OpenAI direto do Postgres —
+        # não existe mais "clone" nenhum. Clientes que ficaram com
+        # status='clonado' do desenho antigo viram 'ativo'; os workflows deles
+        # no n8n foram apagados à parte, então workflow_novo_id/url não
+        # apontam mais pra nada e são zerados junto.
+        # A constraint velha só aceitava 'clonado', não 'ativo' — precisa cair
+        # ANTES do UPDATE, senão o Postgres rejeita a troca de valor (e, como
+        # tudo aqui roda numa transação só, a migração inteira falha calada:
+        # o garantir_schema() captura a exceção pra não derrubar o container,
+        # e nem a coluna whatsapp_grupo_aviso chega a ser criada).
+        conn.execute("ALTER TABLE clientes DROP CONSTRAINT IF EXISTS clientes_status_check")
+        conn.execute(
+            "UPDATE clientes SET status = 'ativo', workflow_novo_id = NULL, "
+            "workflow_novo_url = NULL WHERE status = 'clonado'"
+        )
+        conn.execute(
+            "ALTER TABLE clientes ADD CONSTRAINT clientes_status_check "
+            "CHECK (status IN ('rascunho', 'ativo', 'erro'))"
         )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
@@ -367,6 +393,55 @@ def listar_mensagens_agente(contato_id: int, limite: int = 20) -> list:
     return [{"role": r[0], "conteudo": r[1]} for r in linhas]
 
 
+def definir_grupo_aviso(cliente_id: int, grupo_jid: str):
+    """JID do grupo do WhatsApp (ex: 1203630...@g.us) onde o resumo periódico
+    de atendimento deste cliente é mandado. Vazio desliga o envio pra ele."""
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET whatsapp_grupo_aviso = NULLIF(%s, ''), atualizado_em = now() "
+            "WHERE id = %s",
+            (grupo_jid.strip(), cliente_id),
+        )
+
+
+def listar_clientes_com_grupo_aviso() -> list:
+    """Só os clientes com grupo cadastrado — é quem entra no envio do resumo
+    periódico (ver resumo_atendimento em servidor.py, chamado pelo n8n)."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            "SELECT id, cliente_nome, whatsapp_grupo_aviso FROM clientes "
+            "WHERE whatsapp_grupo_aviso IS NOT NULL"
+        ).fetchall()
+    return [{"id": r[0], "cliente_nome": r[1], "grupo": r[2]} for r in linhas]
+
+
+def resumo_atendimento(cliente_id: int) -> dict:
+    """Quantos contatos distintos a IA atendeu hoje e neste mês.
+
+    'Atendeu' = teve pelo menos uma resposta do agente (role='assistant') no
+    período — é a métrica mais simples que já diz algo útil; separar por
+    etapa/funil ou contar handoff finalizado fica pra quando isso for mapeado
+    direito (o Fernando pediu só esse número por enquanto, 15/10/2026).
+    """
+    with _conectar() as conn:
+        linha = conn.execute(
+            """
+            SELECT
+                count(DISTINCT c.id) FILTER (
+                    WHERE m.criado_em >= date_trunc('day', now())
+                ),
+                count(DISTINCT c.id) FILTER (
+                    WHERE m.criado_em >= date_trunc('month', now())
+                )
+            FROM contatos c
+            JOIN agente_mensagens m ON m.contato_id = c.id
+            WHERE c.cliente_id = %s AND m.role = 'assistant'
+            """,
+            (cliente_id,),
+        ).fetchone()
+    return {"atendidos_hoje": linha[0] or 0, "atendidos_mes": linha[1] or 0}
+
+
 def registrar_mensagem_processada(mensagem_id: str, cliente_id: int) -> bool:
     """True se é nova, False se já foi processada antes.
 
@@ -509,30 +584,15 @@ def listar_clientes() -> list:
         return [_linha_para_cliente(cur, r) for r in cur.fetchall()]
 
 
-def marcar_cliente_clonado(cliente_id: int, manifesto, resultado: dict):
-    """Só chamar depois de um clone REAL bem-sucedido (dry_run=False)."""
-    manifesto_seguro = {
-        k: v for k, v in vars(manifesto).items()
-        # segredos — ficam só no workflow/credencial do n8n, nunca duplicados aqui
-        if k not in ("kommo_token", "openai_api_key")
-    }
+def marcar_cliente_ativo(cliente_id: int):
+    """Cliente pronto pra atender — sem clone no n8n, o worker_agente.py lê
+    prompt/Kommo/OpenAI direto do Postgres a partir daqui."""
     with _conectar() as conn:
         conn.execute(
-            """
-            UPDATE clientes
-            SET status = 'clonado', workflow_novo_id = %s, workflow_novo_url = %s,
-                manifesto = %s, avisos = %s, atualizado_em = now()
-            WHERE id = %s
-            """,
-            (
-                resultado["workflow_id"],
-                resultado["workflow_url"],
-                json.dumps(manifesto_seguro),
-                json.dumps(resultado.get("avisos", [])),
-                cliente_id,
-            ),
+            "UPDATE clientes SET status = 'ativo', atualizado_em = now() WHERE id = %s",
+            (cliente_id,),
         )
-    registrar_log(cliente_id, "sistema", f"Clonado com sucesso: {resultado['workflow_id']}.")
+    registrar_log(cliente_id, "sistema", "Credenciais salvas — cliente ativo.")
 
 
 def marcar_cliente_erro(cliente_id: int, erro: str):

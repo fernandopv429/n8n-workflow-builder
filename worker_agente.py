@@ -65,6 +65,16 @@ COMANDOS_RESET = {"reset"}
 RESPOSTA_RESET = "Reset concluído! Vamos do começo."
 
 
+def _quebrar_mensagem(texto: str) -> list:
+    """Separa a resposta em várias bolhas, uma por parágrafo, em vez de um
+    bloco só. O modelo já separa ideias por linha em branco quando escreve
+    algo com mais de uma parte — é o sinal mais barato de "isto devia ser
+    outra mensagem" que existe, sem precisar pedir formato especial no
+    prompt (pedido do Fernando, 15/10/2026)."""
+    partes = [p.strip() for p in (texto or "").split("\n\n")]
+    return [p for p in partes if p] or [""]
+
+
 def _eh_comando_reset(texto: str) -> bool:
     import unicodedata
     limpo = unicodedata.normalize("NFKD", (texto or "").strip().lower())
@@ -538,10 +548,14 @@ def rodar(uma_so: bool = False):
             payload = json.loads(corpo)
             saida = processar(payload)
             if saida:
-                canal.basic_publish(
-                    "", FILA_SAIDA, json.dumps(saida, ensure_ascii=False),
-                    properties=pika.BasicProperties(delivery_mode=2),
-                )
+                # Uma entrada na fila = uma mensagem no WhatsApp (ver "Enviar
+                # texto" no A5 Trilho - Saida), então quebrar em várias bolhas
+                # é publicar várias entradas, uma por parágrafo da resposta.
+                for parte in _quebrar_mensagem(saida.get("texto", "")):
+                    canal.basic_publish(
+                        "", FILA_SAIDA, json.dumps({**saida, "texto": parte}, ensure_ascii=False),
+                        properties=pika.BasicProperties(delivery_mode=2),
+                    )
             canal.basic_ack(metodo.delivery_tag)       # só depois de publicar
             print("ok:", (saida or {}).get("texto", "(sem resposta)")[:90])
         except Exception as e:  # noqa: BLE001
