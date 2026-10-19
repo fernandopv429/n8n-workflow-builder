@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block titulo %}Cadastrar{% endblock %}
+{% block conteudo %}
+<div class="card" style="max-width: 360px; margin: 40px auto;">
+  <h2>Cadastro</h2>
+  {% if primeiro_usuario %}
+  <p class="vazio" style="margin-bottom:12px;">Este é o primeiro cadastro do sistema — você vai virar
+  o usuário <strong>master</strong> (acesso a tudo).</p>
+  {% endif %}
+  <form method="post" action="/registrar">
+    <p><input type="text" name="nome" placeholder="seu nome" required style="width:100%"></p>
+    <p><input type="email" name="email" placeholder="email" required style="width:100%"></p>
+    <p><input type="password" name="senha" placeholder="senha" required style="width:100%"></p>
+    <p><input type="tel" name="telefone_whatsapp" placeholder="whatsapp (ex: 5511999999999)" style="width:100%"></p>
+    <button type="submit" style="width:100%">Cadastrar</button>
+  </form>
+  {% if erro %}<p class="erro">{{ erro }}</p>{% endif %}
+  <p style="margin-top:16px; font-size:13px;">Já tem conta? <a href="/login">Entrar</a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block titulo %}Painel{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <h2>Nova tarefa</h2>
+  <form class="inline" method="post" action="/tarefas">
+    <input type="text" name="titulo" placeholder="título" required style="flex:2">
+    <select name="projeto_id">
+      <option value="">sem projeto</option>
+      {% for p in projetos %}
+      <option value="{{ p.id }}">{{ p.nome }}{% if usuario.is_master %} ({{ p.dono_nome }}){% endif %}</option>
+      {% endfor %}
+    </select>
+    <input type="datetime-local" name="prazo">
+    <button type="submit">Criar</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Tarefas pendentes</h2>
+  {% if tarefas %}
+    {% for t in tarefas %}
+    <div class="lista-item">
+      <div>
+        <strong>{{ t.titulo }}</strong>
+        {% if t.projeto_nome %}<span class="tag">{{ t.projeto_nome }}</span>{% endif %}
+        {% if usuario.is_master %}<span class="tag">{{ t.dono_nome }}</span>{% endif %}
+        {% if t.prazo %}<span class="tag {% if t.prazo < agora %}vencendo{% endif %}">prazo {{ t.prazo.strftime('%d/%m %H:%M') }}</span>{% endif %}
+        {% if t.origem != 'manual' %}<span class="tag">{{ t.origem }}</span>{% endif %}
+      </div>
+      <form method="post" action="/tarefas/{{ t.id }}/concluir">
+        <button type="submit" class="secundario">concluir</button>
+      </form>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="vazio">Nenhuma tarefa pendente.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Novo projeto</h2>
+  <form class="inline" method="post" action="/projetos">
+    <input type="text" name="nome" placeholder="nome do projeto" required style="flex:2">
+    <input type="text" name="descricao" placeholder="descrição (opcional)" style="flex:3">
+    <button type="submit">Criar</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Projetos</h2>
+  {% if projetos %}
+    {% for p in projetos %}
+    <div class="lista-item">
+      <div>
+        <strong>{{ p.nome }}</strong>
+        {% if usuario.is_master %}<span class="tag">{{ p.dono_nome }}</span>{% endif %}
+        {% if p.origem != 'manual' %}<span class="tag">{{ p.origem }}</span>{% endif %}
+      </div>
+      <span class="vazio">{{ p.descricao }}</span>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="vazio">Nenhum projeto ainda.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block titulo %}Tarefas{% endblock %}</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, sans-serif; max-width: 880px; margin: 0 auto; padding: 24px 16px;
+           background: #f7f7f8; color: #1a1a1a; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    header h1 { font-size: 18px; margin: 0; }
+    header nav a { margin-left: 16px; color: #333; text-decoration: none; font-size: 14px; }
+    .card { background: #fff; border: 1px solid #e3e3e6; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+    .lista-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0;
+                  border-bottom: 1px solid #eee; }
+    .lista-item:last-child { border-bottom: none; }
+    .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #eee; color: #555; }
+    .tag.master { background: #fde68a; color: #7a5a00; }
+    .tag.vencendo { background: #fecaca; color: #991b1b; }
+    form.inline { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    input, select, textarea { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+    button { padding: 8px 14px; border: none; border-radius: 6px; background: #1a1a1a; color: #fff;
+             cursor: pointer; font-size: 14px; }
+    button.secundario { background: #eee; color: #1a1a1a; }
+    .erro { color: #b00020; font-size: 14px; margin-top: 8px; }
+    .vazio { color: #888; font-size: 14px; }
+    a.botao-concluir { font-size: 13px; color: #1a7a3e; text-decoration: none; }
+  </style>
+</head>
+<body>
+  {% if usuario %}
+  <header>
+    <h1>Tarefas</h1>
+    <nav>
+      <span class="tag {% if usuario.is_master %}master{% endif %}">
+        {{ usuario.nome }}{% if usuario.is_master %} · master{% endif %}
+      </span>
+      <a href="/">Painel</a>
+      <a href="/logout">Sair</a>
+    </nav>
+  </header>
+  {% endif %}
+  {% block conteudo %}{% endblock %}
+</body>
+</html>
