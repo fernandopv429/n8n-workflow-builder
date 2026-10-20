@@ -89,30 +89,44 @@ const remoteJid = chave.remoteJid || '';
 // grupo (@g.us) e status não são atendimento individual
 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid.startsWith('status@')) return [];
 
-// Áudio vai pra fila SEM os bytes: o webhook não os traz, e quem busca na
-// Evolution e transcreve é o worker — lá a chamada usa a chave do cliente, e o
-// custo da transcrição aparece no projeto dele (ver worker_agente.transcrever).
-const ehAudio = !!(msg.audioMessage || msg.pttMessage);
-if (!texto && ehAudio) {
-  return [{ json: {
-    tipo: 'audio',
-    instancia: body.instance || dados.instance || '',
-    id_whatsapp: remoteJid.split('@')[0],
-    nome: dados.pushName || '',
-    texto: '',
-    mensagem_id: chave.id || '',
-  }}];
+// Mídia vai pra fila SEM os bytes: o webhook não os traz, e quem busca na
+// Evolution é o worker — lá a chamada usa a chave do cliente, e o custo da
+// transcrição/leitura aparece no projeto dele (ver worker_agente).
+const base = {
+  instancia: body.instance || dados.instance || '',
+  id_whatsapp: remoteJid.split('@')[0],
+  nome: dados.pushName || '',
+  mensagem_id: chave.id || '',
+};
+
+if (!texto && (msg.audioMessage || msg.pttMessage)) {
+  return [{ json: { ...base, tipo: 'audio', texto: '' } }];
 }
 
-// Imagem, documento, figurinha: ainda não tratados. Sinalizar é melhor que
-// silenciar — o paciente mandou algo e ninguém viu.
+// Imagem ANTES de olhar o texto: com legenda, ela caía no ramo de texto e a
+// legenda passava sozinha — a foto sumia sem ninguém ver. A legenda importa
+// (é o que o paciente perguntou), mas não substitui a imagem.
+if (msg.imageMessage) {
+  return [{ json: { ...base, tipo: 'imagem', texto,
+                    mimetype: msg.imageMessage.mimetype || 'image/jpeg' } }];
+}
+
+// Vídeo o modelo não lê. Vai pra fila mesmo assim pro worker responder — quem
+// mandou merece saber que não foi visto, em vez de falar com o vazio.
+if (msg.videoMessage) {
+  return [{ json: { ...base, tipo: 'video', texto } }];
+}
+
+// Figurinha costuma ser reação, não pedido: responder a toda figurinha é
+// barulho. Esta é a única coisa que continua sendo descartada.
+if (msg.stickerMessage) {
+  return [{ json: { ignorado: true, motivo: 'figurinha', ...base } }];
+}
+
+// Documento e o resto: o worker responde que não consegue abrir.
 if (!texto) {
-  return [{ json: {
-    ignorado: true,
-    motivo: Object.keys(msg)[0] || 'sem texto',
-    instancia: body.instance || dados.instance || '',
-    id_whatsapp: remoteJid.split('@')[0],
-  }}];
+  return [{ json: { ...base, tipo: 'nao_suportado',
+                    motivo: Object.keys(msg)[0] || 'sem texto' } }];
 }
 
 return [{ json: {

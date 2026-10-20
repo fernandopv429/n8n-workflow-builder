@@ -611,7 +611,124 @@ def teste_reset_so_dispara_em_comando_exato():
         assert not w._eh_comando_reset(conversa), f"NÃO deveria ser comando: {conversa!r}"
 
 
+def teste_normalizador_classifica_cada_tipo_de_midia():
+    """O Code do trilho roda no n8n, então é testado como JS de verdade.
+
+    O defeito que isto tranca: imagem COM legenda caía no ramo de texto, a
+    legenda seguia sozinha e a foto sumia sem ninguém ver — o paciente achava
+    que tinha mostrado o exame.
+    """
+    import json as _json
+    import subprocess
+    import tempfile
+    import trilho_n8n
+
+    casos = [
+        ("texto puro", {"conversation": "oi"}, {"tipo": "texto", "texto": "oi"}),
+        ("audio", {"audioMessage": {}}, {"tipo": "audio", "texto": ""}),
+        ("imagem sem legenda", {"imageMessage": {"mimetype": "image/png"}},
+         {"tipo": "imagem", "texto": "", "mimetype": "image/png"}),
+        ("imagem com legenda",
+         {"imageMessage": {"caption": "isso ta normal?", "mimetype": "image/jpeg"}},
+         {"tipo": "imagem", "texto": "isso ta normal?"}),
+        ("video sem legenda", {"videoMessage": {}}, {"tipo": "video", "texto": ""}),
+        ("video com legenda", {"videoMessage": {"caption": "olha isso"}},
+         {"tipo": "video", "texto": "olha isso"}),
+        ("documento", {"documentMessage": {}}, {"tipo": "nao_suportado"}),
+        ("figurinha", {"stickerMessage": {}}, {"ignorado": True}),
+    ]
+
+    codigo = trilho_n8n.CODIGO_NORMALIZA
+    for nome, msg, esperado in casos:
+        entrada = {"body": {"instance": "inst", "data": {
+            "key": {"id": "ABC", "remoteJid": "5511999@s.whatsapp.net"},
+            "pushName": "Claudio", "message": msg}}}
+        js = (f"const entrada = {_json.dumps(entrada)};\n"
+              "const $input = { first: () => ({ json: entrada }) };\n"
+              f"const saida = (() => {{{codigo}}})();\n"
+              "console.log(JSON.stringify(saida));\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(js)
+            caminho = f.name
+        bruto = subprocess.run(["node", caminho], capture_output=True, text=True, timeout=30)
+        assert bruto.returncode == 0, f"{nome}: node falhou: {bruto.stderr[:300]}"
+        saida = _json.loads(bruto.stdout)
+        assert len(saida) == 1, f"{nome}: esperava 1 item, veio {len(saida)}"
+        obtido = saida[0]["json"]
+        for k, v in esperado.items():
+            assert obtido.get(k) == v, f"{nome}: {k} = {obtido.get(k)!r}, esperado {v!r}"
+        # a chave de idempotência nunca pode faltar: sem ela, reentrega do
+        # Evolution vira resposta repetida pro paciente
+        if not obtido.get("ignorado"):
+            assert obtido.get("mensagem_id") == "ABC", f"{nome}: perdeu o mensagem_id"
+
+
+def teste_grupo_e_eco_do_proprio_agente_continuam_descartados():
+    """Mexer na classificação de mídia não pode reabrir o loop do fromMe."""
+    import json as _json
+    import subprocess
+    import tempfile
+    import trilho_n8n
+
+    casos = [
+        ("eco do agente", {"id": "A", "remoteJid": "5511999@s.whatsapp.net", "fromMe": True}),
+        ("grupo", {"id": "B", "remoteJid": "123456@g.us"}),
+        ("status", {"id": "C", "remoteJid": "status@broadcast"}),
+    ]
+    for nome, chave in casos:
+        entrada = {"body": {"instance": "i", "data": {
+            "key": chave, "message": {"imageMessage": {}}}}}
+        js = (f"const entrada = {_json.dumps(entrada)};\n"
+              "const $input = { first: () => ({ json: entrada }) };\n"
+              f"const saida = (() => {{{trilho_n8n.CODIGO_NORMALIZA}}})();\n"
+              "console.log(JSON.stringify(saida));\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(js)
+            caminho = f.name
+        r = subprocess.run(["node", caminho], capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, f"{nome}: {r.stderr[:200]}"
+        assert _json.loads(r.stdout) == [], f"{nome}: deveria ser descartado"
+
+
+def teste_imagem_vira_texto_preservando_a_legenda():
+    """A descrição entra no histórico; a legenda continua sendo a pergunta.
+
+    Só a descrição faria o agente responder sobre a foto sem saber o que foi
+    perguntado ("isso aqui tá normal?" é o pedido, não a imagem)."""
+    import worker_agente as w
+
+    chamadas = {}
+
+    def falso_descrever(cliente, instancia, mensagem_id, mimetype="image/jpeg"):
+        chamadas["mimetype"] = mimetype
+        return "Receita médica com o nome Claudio, medicamento X, 2x ao dia."
+
+    original = w.descrever_imagem
+    w.descrever_imagem = falso_descrever
+    try:
+        texto, mime = "isso aqui ta normal?", "image/png"
+        descricao = w.descrever_imagem({}, "inst", "ABC", mime)
+        combinado = f"{texto}\n[imagem enviada pelo paciente: {descricao}]"
+        assert texto in combinado, "a legenda sumiu"
+        assert "Receita médica" in combinado, "a descrição sumiu"
+        assert chamadas["mimetype"] == mime, "o mimetype do WhatsApp não chegou"
+    finally:
+        w.descrever_imagem = original
+
+
+def teste_tipo_que_nao_lemos_tem_resposta_pronta():
+    """Vídeo e arquivo não podem virar silêncio: o paciente mandou algo."""
+    import worker_agente as w
+    for aviso in (w.SEM_VIDEO, w.SEM_ARQUIVO, w.FALHA_IMAGEM):
+        assert aviso.strip(), "aviso vazio vira silêncio"
+        assert "?" in aviso, f"aviso sem saída pro paciente: {aviso!r}"
+
+
 TESTES = [
+    teste_normalizador_classifica_cada_tipo_de_midia,
+    teste_grupo_e_eco_do_proprio_agente_continuam_descartados,
+    teste_imagem_vira_texto_preservando_a_legenda,
+    teste_tipo_que_nao_lemos_tem_resposta_pronta,
     teste_detecta_subworkflow_errada_sabrina,
     teste_fabifisio_nao_mentoria_esta_correto,
     teste_detecta_correcao_parcial_fabifisio_mentoria,

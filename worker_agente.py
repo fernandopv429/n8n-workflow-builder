@@ -197,6 +197,33 @@ FALHA_AUDIO = (
     "Pode me mandar por escrito?"
 )
 
+# Imagem: mesmo raciocínio de custo da transcrição, e o gpt-4o-mini já enxerga,
+# então não entra modelo novo na conta.
+LIMITE_IMAGEM_MB = 10
+FALHA_IMAGEM = (
+    "Recebi sua imagem, mas não consegui abrir agora. "
+    "Pode me contar pelo texto o que aparece nela?"
+)
+# Vídeo o modelo não lê, e documento nós não abrimos. O paciente mandou alguma
+# coisa: ficar calado faz ele achar que foi visto.
+SEM_VIDEO = (
+    "Recebi seu vídeo, mas não consigo assistir por aqui. "
+    "Pode me descrever, mandar uma foto ou escrever o que precisa?"
+)
+SEM_ARQUIVO = (
+    "Recebi seu arquivo, mas não consigo abrir por aqui. "
+    "Pode me escrever o que precisa, ou mandar como foto?"
+)
+# O que a imagem precisa virar: texto que sirva ao atendimento. Sem isto o
+# modelo descreve enquadramento e iluminação, que não ajudam ninguém.
+INSTRUCAO_IMAGEM = (
+    "Descreva objetivamente o que há nesta imagem, para um atendente de "
+    "WhatsApp que não pode vê-la. Se houver texto (receita, exame, documento, "
+    "comprovante, print de conversa), transcreva o texto. Se for foto de uma "
+    "pessoa ou de parte do corpo, descreva o que se vê sem opinar sobre "
+    "diagnóstico. Seja direto, no máximo 120 palavras."
+)
+
 
 def transcrever(cliente: dict, instancia: str, mensagem_id: str) -> str:
     """Baixa o áudio da Evolution e devolve o texto. "" se não der.
@@ -222,6 +249,33 @@ def transcrever(cliente: dict, instancia: str, mensagem_id: str) -> str:
         model=MODELO_TRANSCRICAO, file=arquivo, language="pt"
     )
     return (resposta.text or "").strip()
+
+
+def descrever_imagem(cliente: dict, instancia: str, mensagem_id: str,
+                    mimetype: str = "image/jpeg") -> str:
+    """Baixa a imagem da Evolution e devolve uma descrição em texto.
+
+    A imagem não entra no histórico: vira texto aqui e o resto do fluxo segue
+    só com texto — igual ao áudio. Guardar a imagem em cada turno multiplicaria
+    o custo de toda a conversa seguinte, e o histórico é relido a cada mensagem.
+    """
+    import base64
+
+    bruto = evolution_client.obter_midia_base64(instancia, mensagem_id)
+    if not bruto:
+        return ""
+    if len(base64.b64decode(bruto)) > LIMITE_IMAGEM_MB * 1024 * 1024:
+        raise ValueError(f"imagem acima de {LIMITE_IMAGEM_MB} MB")
+
+    resposta = _cliente_openai(cliente).chat.completions.create(
+        model=agente_chat.MODELO,
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": INSTRUCAO_IMAGEM},
+            {"type": "image_url",
+             "image_url": {"url": f"data:{mimetype or 'image/jpeg'};base64,{bruto}"}},
+        ]}],
+    )
+    return (resposta.choices[0].message.content or "").strip()
 
 
 def _ferramentas_dos_mcps(cliente: dict) -> tuple:
@@ -440,9 +494,14 @@ def processar(payload: dict) -> dict:
     if mensagem_id and not db.registrar_mensagem_processada(mensagem_id, cliente_id):
         return None  # reentrega do WhatsApp ou da fila — já respondemos esta
 
-    # Áudio: o trilho manda a referência, os bytes vêm da Evolution e a
-    # transcrição acontece aqui, com a chave do cliente (ver `transcrever`).
-    aviso_audio = ""
+    # Mídia: o trilho manda a referência, os bytes vêm da Evolution e a leitura
+    # acontece aqui, com a chave do cliente (ver `transcrever`/`descrever_imagem`).
+    #
+    # `aviso` é a resposta pronta pra quando não dá pra ler o que chegou, e
+    # `rotulo` é o que fica no histórico no lugar da mídia — assim a próxima
+    # mensagem do paciente tem contexto do que ele mandou antes.
+    aviso = ""
+    rotulo = ""
     if tipo == "audio" and not texto:
         try:
             texto = transcrever(cliente, payload.get("instancia") or "", mensagem_id)
@@ -451,14 +510,46 @@ def processar(payload: dict) -> dict:
                 f"[worker] áudio transcrito ({len(texto)} caracteres): {texto[:120]}",
             )
         except ValueError as e:
-            aviso_audio = AUDIO_LONGO_DEMAIS
+            aviso, rotulo = AUDIO_LONGO_DEMAIS, "[áudio longo demais]"
             db.registrar_log(cliente_id, "sistema", f"[worker] áudio recusado: {e}")
         except Exception as e:  # noqa: BLE001 — Evolution/OpenAI fora do ar
-            aviso_audio = FALHA_AUDIO
+            aviso, rotulo = FALHA_AUDIO, "[áudio que não consegui ouvir]"
             db.registrar_log(cliente_id, "erro", f"[worker] falha ao transcrever áudio: {e}")
-        if not texto and not aviso_audio:
+        if not texto and not aviso:
             # transcrição vazia: áudio mudo, ruído, ou alguém mandou sem querer
-            aviso_audio = FALHA_AUDIO
+            aviso, rotulo = FALHA_AUDIO, "[áudio que não consegui ouvir]"
+
+    # Imagem: vira descrição em texto e segue o fluxo normal. A legenda é
+    # preservada — ela costuma ser a pergunta ("isso aqui tá normal?"), e
+    # sozinha a descrição não diz o que a pessoa quer.
+    if tipo == "imagem":
+        try:
+            descricao = descrever_imagem(
+                cliente, payload.get("instancia") or "", mensagem_id,
+                str(payload.get("mimetype") or "image/jpeg"))
+            if descricao:
+                texto = (f"{texto}\n[imagem enviada pelo paciente: {descricao}]"
+                         if texto else f"[imagem enviada pelo paciente: {descricao}]")
+                db.registrar_log(cliente_id, "sistema",
+                                 f"[worker] imagem lida: {descricao[:140]}")
+            else:
+                aviso, rotulo = FALHA_IMAGEM, "[imagem que não consegui abrir]"
+        except ValueError as e:
+            aviso, rotulo = FALHA_IMAGEM, "[imagem grande demais]"
+            db.registrar_log(cliente_id, "sistema", f"[worker] imagem recusada: {e}")
+        except Exception as e:  # noqa: BLE001 — Evolution/OpenAI fora do ar
+            aviso, rotulo = FALHA_IMAGEM, "[imagem que não consegui abrir]"
+            db.registrar_log(cliente_id, "erro", f"[worker] falha ao ler imagem: {e}")
+
+    # Vídeo e arquivo: não lemos. Com legenda, a legenda vale como mensagem e o
+    # agente fica sabendo que havia mídia junto; sem legenda, só resta avisar.
+    if tipo == "video":
+        if texto:
+            texto += "\n[o paciente enviou um vídeo junto, que você não consegue ver]"
+        else:
+            aviso, rotulo = SEM_VIDEO, "[vídeo que não consigo ver]"
+    elif tipo == "nao_suportado" and not texto:
+        aviso, rotulo = SEM_ARQUIVO, f"[arquivo que não consigo abrir: {payload.get('motivo', '?')}]"
 
     contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
 
@@ -492,12 +583,12 @@ def processar(payload: dict) -> dict:
 
     # Paciente sem resposta é o pior desfecho: se a transcrição falhou, avisa e
     # pede por escrito, em vez de ficar calado como antes.
-    if aviso_audio:
-        db.salvar_mensagem_agente(contato["id"], "user", "[áudio que não consegui ouvir]")
-        db.salvar_mensagem_agente(contato["id"], "assistant", aviso_audio)
+    if aviso:
+        db.salvar_mensagem_agente(contato["id"], "user", rotulo or "[mídia não lida]")
+        db.salvar_mensagem_agente(contato["id"], "assistant", aviso)
         return {"cliente_id": cliente_id,
                 "instancia": cliente.get("evolution_instancia") or instancia,
-                "id_whatsapp": id_whatsapp, "texto": aviso_audio,
+                "id_whatsapp": id_whatsapp, "texto": aviso,
                 "mensagem_id": mensagem_id}
 
     db.salvar_mensagem_agente(contato["id"], "user", texto)
