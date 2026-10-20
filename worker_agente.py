@@ -41,7 +41,7 @@ import db  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import evolution_client
-import midias  # noqa: E402
+import pocketbase_client  # noqa: E402
 import n8n_edicao  # noqa: E402
 
 FILA_ENTRADA = "agente.entrada"
@@ -460,7 +460,8 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
             if not instancia or not numero:
                 return "erro: sem instância do WhatsApp ou número do paciente"
             try:
-                url = midias.url_publica(item["id_publico"])
+                url = pocketbase_client.url_midia(
+                    item["pb_record_id"], item["pb_filename"])
                 evolution_client.enviar_midia(
                     instancia, numero, url, item["mimetype"],
                     str(args.get("legenda") or ""), item["nome_original"])

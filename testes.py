@@ -793,27 +793,28 @@ def teste_tipo_de_midia_mapeia_o_que_o_whatsapp_espera():
         assert e.tipo_de_midia(m) == "document", m
 
 
-def teste_url_do_arquivo_falha_claro_sem_painel_url():
-    """Sem PAINEL_URL não dá pra montar o endereço que a Evolution baixa.
+def teste_url_do_arquivo_aponta_pra_colecao_do_painel():
+    """O arquivo é servido pelo PocketBase, não por rota nossa.
 
-    Falhar aqui é melhor que mandar um link que ninguém abre — o paciente
-    receberia um arquivo quebrado e nós não saberíamos."""
-    import os
-    import config
-    import midias
-    original = config.carregar_env
-    config.carregar_env = lambda: {}
-    anterior = os.environ.pop("PAINEL_URL", None)
+    A coleção é separada de propósito: `midia` genérica é de outro projeto da
+    A5, e a de imagem tem teto de 5 MB e só aceita imagem."""
+    import pocketbase_client as pb
+    u = pb.url_midia("rec123", "arq.pdf")
+    assert "/api/files/painel_agentes_midias/rec123/arq.pdf" in u, u
+    # sem referência não há URL: melhor vazio que link quebrado no WhatsApp
+    assert pb.url_midia("", "arq.pdf") == ""
+    assert pb.url_midia("rec123", "") == ""
+
+
+def teste_arquivo_grande_demais_e_barrado_antes_de_subir():
+    """16 MB é o teto do WhatsApp: acima disso a falha apareceria no aparelho
+    do paciente, não aqui."""
+    import pocketbase_client as pb
     try:
-        try:
-            midias.url_publica("abc")
-            assert False, "deveria ter falhado"
-        except RuntimeError as e:
-            assert "PAINEL_URL" in str(e)
-    finally:
-        config.carregar_env = original
-        if anterior is not None:
-            os.environ["PAINEL_URL"] = anterior
+        pb.enviar_midia(1, "grande", "a.mp4", b"x" * (pb.TAMANHO_MAXIMO_MIDIA + 1))
+        assert False, "deveria ter barrado"
+    except pb.PocketBaseError as e:
+        assert "limite do WhatsApp" in str(e), str(e)
 
 
 TESTES = [
@@ -821,7 +822,8 @@ TESTES = [
     teste_sem_arquivo_cadastrado_a_ferramenta_nem_aparece,
     teste_envio_busca_o_arquivo_pelo_cliente_e_nao_pelos_argumentos,
     teste_tipo_de_midia_mapeia_o_que_o_whatsapp_espera,
-    teste_url_do_arquivo_falha_claro_sem_painel_url,
+    teste_url_do_arquivo_aponta_pra_colecao_do_painel,
+    teste_arquivo_grande_demais_e_barrado_antes_de_subir,
     teste_normalizador_classifica_cada_tipo_de_midia,
     teste_grupo_e_eco_do_proprio_agente_continuam_descartados,
     teste_imagem_vira_texto_preservando_a_legenda,

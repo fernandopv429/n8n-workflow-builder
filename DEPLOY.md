@@ -69,27 +69,28 @@ escrito por desconhecido no WhatsApp (ver comentários no próprio compose).
 
 ## Arquivos que o agente envia
 
-Duas variáveis novas, já no compose com padrão:
+**Nenhuma variável nova.** Os arquivos ficam no PocketBase compartilhado da A5
+(`db.a5ecossistema.tech`), o mesmo hub que já guarda a imagem de card dos
+clientes e as mídias do cadastro-veiculos. As credenciais já estavam no compose.
 
-```
-PAINEL_URL=https://engine.a5ecossistema.tech
-MIDIAS_DIR=/dados/midias
-```
+Coleção própria do projeto, `painel_agentes_midias`, criada no padrão da de
+imagem: leitura pública, escrita só com superusuário. Teto de 16 MB (o do
+WhatsApp pra vídeo) e sem restrição de tipo, porque entra vídeo, PDF e imagem.
+A `midia` genérica que existe lá é de outro projeto — não usar.
 
-`PAINEL_URL` é por onde a **Evolution baixa** o arquivo. Ela roda em outro host,
-então caminho relativo não serve; sem isso o envio falha ao montar a URL — e
-falha explicitamente, de propósito, em vez de mandar um link que ninguém abre.
+Leitura pública é requisito, não descuido: quem **baixa** o arquivo é a
+Evolution, e ela não sabe autenticar no painel. Serve material de divulgação
+(orientação, preço, vídeo institucional), não documento de paciente.
 
-A rota `/midias/<id>` fica **fora da senha do painel**, porque a Evolution não
-sabe autenticar. O que protege é o id aleatório de 32 caracteres: não há rota
-que liste e não dá pra adivinhar. Serve material de divulgação — orientação,
-preço, vídeo institucional — não documento sigiloso de paciente.
+O worker recebe só `POCKETBASE_URL`, sem as credenciais de admin: ele precisa
+montar o endereço de download, não escrever. Quem sobe arquivo é o painel —
+mantendo a regra de não pôr credencial no processo que lê texto escrito por
+desconhecido no WhatsApp.
 
-`MIDIAS_DIR` **precisa ser volume** (o compose já declara `midias:`). Sem
-volume, o redeploy recria o contêiner, os arquivos somem e as linhas continuam
-no banco apontando pra nada: a tela mostra o item, o agente promete o PDF e a
-Evolution não baixa. A rota devolve 410 dizendo exatamente isso, e a aba
-Arquivos marca "arquivo sumiu do disco" — mas o estrago já aconteceu.
+A primeira versão disso usava volume de disco. Trocado porque volume esquecido
+no redeploy apaga arquivo em silêncio e deixa a linha no banco apontando pra
+nada: a tela mostraria o item, o agente prometeria o PDF e a Evolution não
+baixaria. O PocketBase sobrevive a redeploy e já é feito pra isso.
 
 **O domínio em Docker Compose vai por variável, não pelo campo Domains.** O
 Coolify ignora aquele campo nesse build pack e usa

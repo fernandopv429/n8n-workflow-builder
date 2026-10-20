@@ -26,6 +26,16 @@ from config import carregar_env  # noqa: E402
 COLECAO = "painel_agentes_imagens"
 TAMANHO_MAXIMO = 5 * 1024 * 1024  # mesmo teto declarado na coleção
 
+# Arquivos que o AGENTE envia pro paciente (vídeo de preparo, PDF de
+# orientação). Coleção separada da imagem do cliente porque o teto e o tipo são
+# outros: 16 MB, e entra vídeo e PDF, não só imagem.
+#
+# Fica aqui, e não em volume de disco, porque o PocketBase já é o hub de
+# arquivos da A5 e sobrevive a redeploy — volume esquecido apaga arquivo em
+# silêncio e deixa a linha no banco apontando pra nada.
+COLECAO_MIDIA = "painel_agentes_midias"
+TAMANHO_MAXIMO_MIDIA = 16 * 1024 * 1024  # teto do WhatsApp pra vídeo
+
 _token = None
 
 
@@ -69,7 +79,8 @@ def _autenticar() -> str:
     return _token
 
 
-def _multipart(campos: dict, arquivo_nome: str, arquivo_bytes: bytes) -> tuple:
+def _multipart(campos: dict, arquivo_nome: str, arquivo_bytes: bytes,
+               campo: str = "imagem") -> tuple:
     """Monta o corpo multipart/form-data. Devolve (content_type, corpo)."""
     limite = f"----painel{uuid.uuid4().hex}"
     tipo = mimetypes.guess_type(arquivo_nome)[0] or "application/octet-stream"
@@ -79,7 +90,7 @@ def _multipart(campos: dict, arquivo_nome: str, arquivo_bytes: bytes) -> tuple:
             f"--{limite}\r\nContent-Disposition: form-data; name=\"{chave}\"\r\n\r\n{valor}\r\n".encode("utf-8")
         )
     partes.append(
-        f"--{limite}\r\nContent-Disposition: form-data; name=\"imagem\"; filename=\"{arquivo_nome}\"\r\n"
+        f"--{limite}\r\nContent-Disposition: form-data; name=\"{campo}\"; filename=\"{arquivo_nome}\"\r\n"
         f"Content-Type: {tipo}\r\n\r\n".encode("utf-8")
     )
     partes.append(arquivo_bytes)
@@ -133,3 +144,63 @@ def remover_imagem(record_id: str):
     except urllib.error.HTTPError as e:
         if e.code != 404:  # já removida é resultado aceitável
             raise PocketBaseError(f"falha ao remover a imagem ({e.code})") from None
+
+
+def enviar_midia(cliente_id: int, rotulo: str, nome_arquivo: str,
+                 conteudo: bytes) -> dict:
+    """Sobe um arquivo que o agente pode enviar. Devolve {record_id, filename, url}.
+
+    `rotulo` vai junto só pra dar nome ao registro no PocketBase e facilitar
+    achar à mão; quem manda na busca é o nosso Postgres.
+    """
+    if len(conteudo) > TAMANHO_MAXIMO_MIDIA:
+        raise PocketBaseError(
+            f"arquivo tem {len(conteudo) // (1024*1024)} MB — o limite do WhatsApp "
+            f"é {TAMANHO_MAXIMO_MIDIA // (1024*1024)} MB"
+        )
+
+    tipo, corpo = _multipart(
+        {"cliente_ref": str(cliente_id), "rotulo": rotulo[:200]},
+        nome_arquivo, conteudo, campo="arquivo")
+    req = urllib.request.Request(
+        f"{_base_url()}/api/collections/{COLECAO_MIDIA}/records", data=corpo, method="POST")
+    req.add_header("Authorization", _autenticar())
+    req.add_header("Content-Type", tipo)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            registro = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise PocketBaseError(
+            f"upload falhou ({e.code}): {e.read().decode('utf-8','replace')[:300]}") from None
+
+    return {
+        "record_id": registro["id"],
+        "filename": registro["arquivo"],
+        "url": url_midia(registro["id"], registro["arquivo"]),
+    }
+
+
+def url_midia(record_id: str, filename: str) -> str:
+    """URL de onde a Evolution BAIXA o arquivo.
+
+    A coleção tem leitura pública, então não precisa de token — e não precisa
+    expor rota nenhuma no painel, que é protegido por senha e a Evolution não
+    sabe autenticar.
+    """
+    if not record_id or not filename:
+        return ""
+    return f"{_base_url()}/api/files/{COLECAO_MIDIA}/{record_id}/{filename}"
+
+
+def remover_midia(record_id: str):
+    if not record_id:
+        return
+    req = urllib.request.Request(
+        f"{_base_url()}/api/collections/{COLECAO_MIDIA}/records/{record_id}",
+        method="DELETE")
+    req.add_header("Authorization", _autenticar())
+    try:
+        urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:  # já removido não é erro
+            raise PocketBaseError(f"remoção falhou ({e.code})") from None

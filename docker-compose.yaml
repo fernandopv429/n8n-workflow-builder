@@ -48,18 +48,7 @@ services:
       - POCKETBASE_ADMIN_EMAIL=${POCKETBASE_ADMIN_EMAIL}
       - POCKETBASE_ADMIN_PASSWORD=${POCKETBASE_ADMIN_PASSWORD}
       - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
-      # Arquivos que o agente envia. PAINEL_URL é o endereço por onde a
-      # Evolution BAIXA o arquivo — ela roda em outro host, então caminho
-      # relativo não serve e sem isto o envio falha na hora de montar a URL.
-      - PAINEL_URL=${PAINEL_URL:-https://engine.a5ecossistema.tech}
-      - MIDIAS_DIR=/dados/midias
       - SOURCE_COMMIT=${SOURCE_COMMIT:-}
-    volumes:
-      # TEM que ser volume. Sem isto o contêiner é recriado no redeploy e todo
-      # arquivo enviado some, enquanto as linhas seguem no banco apontando pra
-      # nada — o agente então promete um PDF que não existe mais. A rota devolve
-      # 410 explicando exatamente isso, mas o estrago já aconteceu.
-      - midias:/dados/midias
     healthcheck:
       # /saude é a única rota sem autenticação, justamente pra isto. Devolve 503
       # quando o Postgres não responde, então container de pé com banco fora não
@@ -85,12 +74,17 @@ services:
       - RABBITMQ_AGENTE_URL=${RABBITMQ_AGENTE_URL}
       - EVOLUTION_URL=${EVOLUTION_URL}
       - EVOLUTION_APIKEY=${EVOLUTION_APIKEY}
+      # Só a URL, SEM as credenciais de admin: o worker precisa montar o
+      # endereço de download do arquivo que o agente envia, não escrever no
+      # PocketBase. Quem sobe arquivo é o painel. Mantém a regra de não pôr
+      # credencial no processo que lê texto escrito por desconhecido.
+      - POCKETBASE_URL=${POCKETBASE_URL}
       - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
       # De propósito FORA daqui, e não por esquecimento:
       #   PAINEL_SENHA      — o worker não serve HTTP
       #   OPENAI_ADMIN_KEY  — apaga projetos e chaves da organização inteira;
       #                       não entra no processo que lê texto de desconhecido
-      #   POCKETBASE_*      — imagem de card é assunto do painel
+      #   POCKETBASE_ADMIN_* — quem SOBE arquivo é o painel; o worker só lê
       #   RABBITMQ_URL      — é a credencial de admin do broker; o worker usa a
       #                       escopada (RABBITMQ_AGENTE_URL), que não enxerga as
       #                       filas dos outros projetos da A5
@@ -99,6 +93,3 @@ services:
         # O painel cria o schema do banco na subida (db.garantir_schema). Sem
         # esperar, o worker poderia consumir a fila antes das tabelas existirem.
         condition: service_healthy
-
-volumes:
-  midias:

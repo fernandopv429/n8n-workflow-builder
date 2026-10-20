@@ -48,7 +48,6 @@ import agente_chat  # noqa: E402
 import agente_geral  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
-import midias  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import monitor_fila  # noqa: E402
@@ -112,10 +111,10 @@ ROTA_GERAL_DEMANDANTES = re.compile(r"^/geral/demandantes$")
 ROTA_GERAL_GRUPOS = re.compile(r"^/geral/grupos$")
 ROTA_MCPS_CATALOGO = re.compile(r"^/mcps$")
 ROTA_CLIENTE_MCPS = re.compile(r"^/clientes/(\d+)/mcps$")
-# Arquivos que o agente envia. A rota pública é separada de propósito: quem a
-# usa é a Evolution, que baixa o arquivo e não sabe autenticar no painel.
+# Arquivos que o agente envia. O arquivo em si fica no PocketBase, com leitura
+# pública — por isso não há rota de download aqui: o painel tem senha e a
+# Evolution, que baixa, não sabe autenticar.
 ROTA_CLIENTE_MIDIAS = re.compile(r"^/clientes/(\d+)/midias$")
-ROTA_MIDIA_PUBLICA = re.compile(r"^/midias/([A-Za-z0-9_-]{20,})$")
 # Projeto da OpenAI por cliente, SEM depender de Kommo nem de clonagem. Antes
 # isso só acontecia dentro de PUT /credenciais, que exige Kommo e dispara o
 # clone inteiro — herança do desenho antigo. Quem só queria medir consumo
@@ -227,29 +226,6 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "ok", "banco": "ok",
                 "versao": VERSAO, "no_ar_desde": SUBIU_EM,
             })
-            return
-
-        # Arquivo que o agente envia: FORA da senha, porque quem baixa é a
-        # Evolution. O que protege é o id_publico, aleatório de 32 caracteres —
-        # não há rota que liste, e adivinhar não é viável. Vale pra material de
-        # divulgação (orientação, preço, vídeo), não pra documento sigiloso.
-        m = ROTA_MIDIA_PUBLICA.match(self.path)
-        if m:
-            registro = db.obter_midia_por_id_publico(m.group(1))
-            if not registro:
-                self._responder_json(404, {"error": "não encontrado"})
-                return
-            caminho = pathlib.Path(registro["arquivo"])
-            # Arquivo sumido = volume não montado. Dizer isso explicitamente
-            # poupa horas: a linha está no banco e a tela mostra o item, então
-            # o sintoma aparece como "a Evolution não baixa".
-            if not caminho.is_file():
-                self._responder_json(410, {"error":
-                    "o arquivo não está mais em disco — provavelmente o "
-                    "diretório de mídias não é um volume e o contêiner foi "
-                    "recriado. Suba o arquivo de novo."})
-                return
-            self._servir_arquivo(caminho, registro["mimetype"])
             return
 
         if not self._autenticado():
@@ -383,9 +359,8 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             itens = db.listar_midias_do_cliente(int(m.group(1)))
             for x in itens:
-                # a tela mostra se o arquivo ainda existe: linha no banco com
-                # arquivo sumido é exatamente o que o volume ausente provoca
-                x["em_disco"] = pathlib.Path(x.pop("arquivo", "")).is_file()
+                x["url"] = pocketbase_client.url_midia(
+                    x.pop("pb_record_id", ""), x.pop("pb_filename", ""))
             self._responder_json(200, {"midias": itens})
             return
 
@@ -531,25 +506,24 @@ class Handler(BaseHTTPRequestHandler):
             if not conteudo:
                 self._responder_json(400, {"error": "o arquivo chegou vazio"})
                 return
-            if len(conteudo) > midias.LIMITE_MB * 1024 * 1024:
-                # o WhatsApp recusaria na entrega, e aí a falha apareceria no
-                # aparelho do paciente em vez de aqui
-                self._responder_json(400, {"error":
-                    f"arquivo de {len(conteudo) // (1024*1024)} MB — o limite do "
-                    f"WhatsApp é {midias.LIMITE_MB} MB"})
+            if not pocketbase_client.configurado():
+                self._responder_json(503, {"error":
+                    "PocketBase não configurado (POCKETBASE_URL/ADMIN_EMAIL/"
+                    "ADMIN_PASSWORD) — é lá que os arquivos ficam"})
                 return
 
             mimetype = str(corpo.get("mimetype", "")).strip() or "application/octet-stream"
-            id_publico = midias.novo_id()
+            nome_original = str(corpo.get("nome_original", "")).strip() or nome
             try:
-                caminho = midias.gravar(id_publico, conteudo, mimetype)
-            except OSError as e:
-                self._responder_json(500, {"error": f"não consegui gravar em disco: {e}"})
+                enviado = pocketbase_client.enviar_midia(
+                    cliente_id, nome, nome_original, conteudo)
+            except pocketbase_client.PocketBaseError as e:
+                # inclui o caso de passar de 16 MB, que o próprio cliente barra
+                self._responder_json(400, {"error": str(e)})
                 return
             db.salvar_midia(cliente_id, nome, str(corpo.get("descricao", "")).strip(),
-                            id_publico, str(caminho),
-                            str(corpo.get("nome_original", "")).strip() or nome,
-                            mimetype, len(conteudo))
+                            enviado["record_id"], enviado["filename"],
+                            nome_original, mimetype, len(conteudo))
             db.registrar_log(cliente_id, "sistema",
                              f"Arquivo '{nome}' ({mimetype}, "
                              f"{len(conteudo) // 1024} KB) disponível pro agente enviar.")
@@ -865,12 +839,16 @@ class Handler(BaseHTTPRequestHandler):
         m = ROTA_CLIENTE_MIDIAS.match(self.path)
         if m:
             cliente_id = int(m.group(1))
-            arquivo = db.apagar_midia(cliente_id, int(self._ler_corpo().get("id", 0)))
-            # o arquivo sai do disco junto: linha removida com arquivo órfão
-            # enche o volume em silêncio
-            if arquivo:
-                midias.apagar(arquivo)
-            self._responder_json(200, {"removido": bool(arquivo)})
+            record = db.apagar_midia(cliente_id, int(self._ler_corpo().get("id", 0)))
+            # o arquivo sai do PocketBase junto: linha removida com arquivo
+            # órfão deixa lixo acumulando no hub da A5
+            if record:
+                try:
+                    pocketbase_client.remover_midia(record)
+                except pocketbase_client.PocketBaseError as e:
+                    db.registrar_log(cliente_id, "erro",
+                                     f"arquivo removido do painel mas não do PocketBase: {e}")
+            self._responder_json(200, {"removido": bool(record)})
             return
 
         m = ROTA_CLIENTE_MCPS.match(self.path)

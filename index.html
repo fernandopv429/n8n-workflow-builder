@@ -1269,9 +1269,10 @@ async function carregarArquivos() {
   const itens = d.midias || [];
   const linhas = itens.map(i => `<tr>
       <td>${escaparHtml(i.nome)}
-        ${i.em_disco ? '' : '<br><span class="opcional">arquivo sumiu do disco — suba de novo</span>'}
+        ${i.url ? '' : '<br><span class="opcional">sem arquivo no PocketBase — suba de novo</span>'}
         <br><small class="hint">${escaparHtml(i.nome_original)} · ${escaparHtml(i.mimetype)} · ${tamanhoLegivel(i.tamanho)}</small></td>
-      <td>${escaparHtml(i.descricao || '')}</td>
+      <td>${escaparHtml(i.descricao || '')}
+        ${i.url ? `<br><a href="${escaparHtml(i.url)}" target="_blank" class="hint">ver arquivo</a>` : ''}</td>
       <td style="text-align:right">
         <button type="button" class="handoff-botao arq-apagar" data-id="${i.id}"
                 data-nome="${escaparHtml(i.nome)}">apagar</button></td>
