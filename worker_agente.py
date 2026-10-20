@@ -144,6 +144,17 @@ def _cliente_openai(cliente: dict):
 # recusa qualquer coisa fora desta lista.
 FERRAMENTAS_PERMITIDAS = set()
 
+# Credenciais que SABEMOS preencher. A injeção é por chave declarada no schema
+# da ferramenta, não por caminho de MCP: o `kommo-cartao-lead` é tão
+# multi-inquilino quanto o `kommo-completo`, e amanhã haverá um terceiro.
+#
+# Filtrar pelo schema não é capricho. Mandar `credenciais` inteiro pra qualquer
+# MCP ligado ao cliente entregaria o token do Kommo a um MCP de planilha, de
+# terceiro, de quem for — basta estar marcado "no atendimento". Só vai o que a
+# ferramenta pediu pelo nome.
+CHAVES_CREDENCIAL = mcp_cliente.CHAVES_CREDENCIAL
+
+
 FERRAMENTA_HUMANO = {
     "type": "function",
     "function": {
@@ -233,7 +244,9 @@ def _ferramentas_dos_mcps(cliente: dict) -> tuple:
                              f"[worker] ferramenta '{m['apelido']}' indisponível: {e}")
             continue
         for f in fs:
-            mapa[f["name"]] = m
+            esquema = f.get("input_schema") or {}
+            pedidas = CHAVES_CREDENCIAL & set((esquema.get("properties") or {}).keys())
+            mapa[f["name"]] = {**m, "credenciais_pedidas": pedidas}
             ferramentas.append({"type": "function", "function": {
                 "name": f["name"],
                 "description": f.get("description") or "",
@@ -297,10 +310,20 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     if texto and not (ultima and ultima["role"] == "user" and ultima["conteudo"] == texto):
         mensagens.append({"role": "user", "content": texto})
 
-    # Só busca credencial do Kommo se alguma ferramenta dele estiver liberada:
-    # senão uma falha no n8n/MCP derrubaria um atendimento que não precisa deles.
-    credenciais = n8n_edicao.credenciais_kommo(cliente) if FERRAMENTAS_PERMITIDAS else {}
     ferramentas, mapa_mcp = _ferramentas_do_agente(cliente)
+
+    # Só busca credencial do Kommo se alguma ferramenta REALMENTE a pedir. Antes
+    # isso dependia de FERRAMENTAS_PERMITIDAS, que ficou vazio quando as
+    # ferramentas embutidas saíram — e aí nenhum MCP recebia credencial.
+    # Cliente sem Kommo cadastrado não pode perder o atendimento por causa
+    # disso: a ferramenta falha sozinha e o resto da conversa segue.
+    credenciais = {}
+    if any(m.get("credenciais_pedidas") for m in mapa_mcp.values()):
+        try:
+            credenciais = n8n_edicao.credenciais_kommo(cliente)
+        except Exception as e:  # noqa: BLE001 — credencial ausente ou n8n fora
+            db.registrar_log(cliente["id"], "erro",
+                             f"[worker] sem credencial do Kommo: {e}")
     openai = _cliente_openai(cliente)
 
     for _ in range(MAX_RODADAS):
@@ -345,9 +368,11 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
         m = (mapa_mcp or {}).get(nome)
         if m:
             args = agente_chat._normalizar_args_kommo(args)
-            # Kommo é multi-inquilino: pede a credencial como parâmetro. Os
-            # outros MCPs já têm a credencial dentro deles.
-            extra = credenciais if m["path"] == "kommo-completo" else None
+            # Multi-inquilino pede a credencial como parâmetro; MCP de cliente
+            # único já tem a dele dentro. Quem diz qual é qual é o schema da
+            # ferramenta, não uma lista de caminhos que envelhece.
+            pedidas = m.get("credenciais_pedidas") or set()
+            extra = {k: v for k, v in (credenciais or {}).items() if k in pedidas} or None
             try:
                 return mcp_cliente.chamar_ferramenta(
                     m["path"], nome, args, token=m["token"],

@@ -1127,16 +1127,21 @@ async function carregarFerramentas() {
     // agente da Fabifisio seria vazamento de dado entre clientes, e o nome do
     // MCP não avisa de quem ele é.
     const outros = (c.em_uso_por || []).filter(n => n !== nomeCliente);
-    const bloqueado = !l && outros.length;
+    // Multi-inquilino é exceção legítima: não guarda credencial dentro, recebe
+    // a de cada cliente na chamada. É o caso dos MCPs do Kommo, feitos pra
+    // centralizar — bloqueá-los obrigaria a marcar "serve a todos" toda vez.
+    const bloqueado = !l && outros.length && !c.multi_inquilino;
     return `<tr${bloqueado ? ' style="opacity:.45"' : ''}>
       <td><input type="checkbox" class="mcp-liga" data-path="${escaparHtml(c.path)}"
                  data-nome="${escaparHtml(c.nome)}" data-outros="${escaparHtml(outros.join(', '))}"
-                 ${marcado}></td>
+                 data-multi="${c.multi_inquilino ? '1' : ''}" ${marcado}></td>
       <td>${escaparHtml(c.nome)}<br><small class="hint">${escaparHtml(c.path)}</small></td>
       <td style="text-align:center">
         <input type="checkbox" class="mcp-atend" data-path="${escaparHtml(c.path)}" ${atend}
                ${l ? '' : 'disabled'}></td>
       <td>${bloqueado ? `<span class="opcional">também usado por ${escaparHtml(outros.join(', '))} — marcar pede confirmação</span>` : ''}
+          ${!bloqueado && outros.length && c.multi_inquilino
+            ? `<span class="opcional">compartilhada (usa a credencial de cada cliente)</span>` : ''}
           ${c.ativo ? '' : '<span class="opcional">inativo no n8n</span>'}
           ${c.autenticado ? '' : '<span class="opcional">sem autenticação</span>'}</td>
     </tr>`;
@@ -1216,10 +1221,15 @@ async function carregarFerramentas() {
   caixa.querySelectorAll('.mcp-liga').forEach(c => c.addEventListener('change', ev => {
     const p = ev.target.dataset.path;
     const outros = ev.target.dataset.outros;
-    // Bloqueado = já usado por outro cliente. Em vez de travar pra sempre
-    // (MCP multi-tenant, tipo o do Kommo, nunca poderia ser ligado em
-    // ninguém além do primeiro), pede confirmação explícita aqui.
-    if (ev.target.checked && outros) {
+    // Já usado por outro cliente. Em vez de travar pra sempre (MCP
+    // multi-tenant, tipo o do Kommo, nunca poderia ser ligado em ninguém além
+    // do primeiro), pede confirmação explícita aqui.
+    //
+    // Menos quando dá pra verificar: o servidor lê o schema das ferramentas e
+    // diz se a credencial é injetada por chamada — que é EXATAMENTE o que esta
+    // pergunta faz. Perguntar assim mesmo ensinaria a clicar OK sem ler, e aí
+    // o diálogo não protege mais no caso em que ele importa.
+    if (ev.target.checked && outros && !ev.target.dataset.multi) {
       const ok = confirm(
         `"${ev.target.dataset.nome}" já é usado por ${outros}. Ligar aqui também só é seguro `
         + "se essa ferramenta injeta a credencial de CADA cliente na hora da chamada (como o "

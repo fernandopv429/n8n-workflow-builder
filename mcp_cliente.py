@@ -26,6 +26,7 @@ nome prefixado pelo apelido do MCP (`agenda__buscar_horarios`), e
 `chamar_ferramenta` desfaz o prefixo antes de mandar pro n8n.
 """
 import asyncio
+import json
 import pathlib
 import sys
 
@@ -42,6 +43,12 @@ from mcp.client.streamable_http import (  # noqa: E402
 )
 
 SEPARADOR = "__"
+
+# Credenciais que o CHAMADOR injeta em MCP multi-inquilino. Serve pra duas
+# coisas: saber o que mandar na chamada, e reconhecer que o MCP não guarda
+# credencial nenhuma dentro dele — é o que torna seguro ligá-lo em vários
+# clientes.
+CHAVES_CREDENCIAL = {"kommo_domain", "access_token"}
 
 
 class McpIndisponivel(RuntimeError):
@@ -152,11 +159,34 @@ def chamar_ferramenta(path: str, nome: str, argumentos: dict, token: str = "",
     """
     if apelido and nome.startswith(f"{apelido}{SEPARADOR}"):
         nome = nome[len(apelido) + len(SEPARADOR):]
-    args = {**(argumentos or {}), **(credenciais or {})}
+    # Credencial NUNCA vem do modelo. O `$fromAI` do n8n expõe kommo_domain e
+    # access_token no schema, então o modelo é capaz de propor valores — e o
+    # texto do paciente influencia o que ele propõe ("use o token X"). Tiramos
+    # o que ele mandou e pomos o do cadastro; sem cadastro, a chamada falha
+    # com parâmetro faltando, que é o erro honesto, em vez de sair com um
+    # token inventado.
+    limpos = {k: v for k, v in (argumentos or {}).items() if k not in CHAVES_CREDENCIAL}
+    args = {**limpos, **(credenciais or {})}
     try:
         return asyncio.run(_chamar_async(path, token, nome, args))
     except Exception as e:  # noqa: BLE001
         raise McpIndisponivel(f"MCP '{path}', ferramenta '{nome}': {str(e)[:160]}") from None
+
+
+def _multi_inquilino_pelo_workflow(wf: dict) -> bool:
+    """Mesma pergunta de `_multi_inquilino`, respondida pelo JSON do workflow.
+
+    O catálogo já baixou o workflow pra achar o gatilho; perguntar ao MCP de
+    novo custaria uma conexão por linha da tela.
+    """
+    nodes = [n for n in wf.get("nodes", []) if "Tool" in n.get("type", "")]
+    if not nodes:
+        return False
+    for n in nodes:
+        bruto = json.dumps(n.get("parameters") or {}, ensure_ascii=False)
+        if not any(f"$fromAI('{c}'" in bruto for c in CHAVES_CREDENCIAL):
+            return False
+    return True
 
 
 def catalogo() -> list:
@@ -187,8 +217,29 @@ def catalogo() -> list:
                 "path": (n.get("parameters") or {}).get("path", ""),
                 "ativo": bool(wf.get("active")),
                 "autenticado": bool((n.get("parameters") or {}).get("authentication")),
+                # lido do próprio workflow, sem abrir conexão com cada MCP:
+                # o catálogo monta uma tela e oito round-trips a travariam
+                "multi_inquilino": _multi_inquilino_pelo_workflow(wf),
             })
     return sorted(achados, key=lambda x: x["nome"])
+
+
+def _multi_inquilino(ferramentas: list) -> bool:
+    """MCP que PEDE a credencial como parâmetro não guarda nenhuma dentro — por
+    isso serve a todos os clientes sem um ver o dado do outro.
+
+    A pergunta é respondida pelo schema, não por uma lista de caminhos: quando
+    o `kommo-cartao-lead` apareceu, a lista teria ficado desatualizada em
+    silêncio, e o erro desse tipo aparece como vazamento, não como falha.
+    Exige a credencial em TODAS as ferramentas: uma que não peça é uma que lê
+    com credencial de outra pessoa.
+    """
+    if not ferramentas:
+        return False
+    return all(
+        CHAVES_CREDENCIAL & set(((f.get("input_schema") or {}).get("properties") or {}).keys())
+        for f in ferramentas
+    )
 
 
 def testar(path: str, token: str = "") -> dict:
@@ -200,9 +251,11 @@ def testar(path: str, token: str = "") -> dict:
     try:
         fs = listar_ferramentas(path, token)
     except McpIndisponivel as e:
-        return {"ok": False, "motivo": str(e), "ferramentas": []}
+        return {"ok": False, "motivo": str(e), "ferramentas": [],
+                "multi_inquilino": False}
     return {"ok": True, "quantidade": len(fs),
-            "ferramentas": [f["name"] for f in fs]}
+            "ferramentas": [f["name"] for f in fs],
+            "multi_inquilino": _multi_inquilino(fs)}
 
 
 if __name__ == "__main__":  # diagnóstico

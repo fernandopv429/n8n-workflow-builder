@@ -498,7 +498,11 @@ class Handler(BaseHTTPRequestHandler):
             # cliente é vazamento de dado entre clientes, e a tela pode ser
             # contornada. `compartilhada` é a saída explícita pra MCP que
             # realmente serve todos (o do Kommo é multi-inquilino por desenho).
-            if not bool(corpo.get("compartilhada")):
+            # MCP multi-inquilino não precisa de ninguém marcar nada: ele não
+            # guarda credencial dentro, recebe a de cada cliente na chamada.
+            # Exigir a marcação manual aqui treinaria o operador a marcar
+            # "serve a todos" por hábito — inclusive no MCP que não é.
+            if not bool(corpo.get("compartilhada")) and not teste.get("multi_inquilino"):
                 donos = [n for n in db.quem_usa_cada_mcp().get(path, [])
                          if n != db.obter_cliente(cliente_id)["cliente_nome"]]
                 if donos:
