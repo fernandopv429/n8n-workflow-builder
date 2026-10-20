@@ -302,6 +302,7 @@
         Atendimento <span id="atendimento-resumo" class="opcional"></span></button>
       <button type="button" class="aba" data-aba="whatsapp">WhatsApp</button>
       <button type="button" class="aba" data-aba="ferramentas">Ferramentas</button>
+      <button type="button" class="aba" data-aba="arquivos">Arquivos</button>
       <button type="button" class="aba" data-aba="consumo">Consumo</button>
       <button type="button" class="aba" data-aba="logs">Logs</button>
     </nav>
@@ -324,6 +325,10 @@
 
   <div class="painel-aba" id="painel-ferramentas" style="display:none">
     <div id="ferramentas-conteudo"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-arquivos" style="display:none">
+    <div id="arquivos-conteudo"></div>
   </div>
 
   <div class="painel-aba" id="painel-consumo" style="display:none">
@@ -813,6 +818,7 @@ function trocarAba(nome) {
   if (nome === 'consumo') carregarConsumo();
   if (nome === 'whatsapp') carregarWhatsapp();
   if (nome === 'ferramentas') carregarFerramentas();
+  if (nome === 'arquivos') carregarArquivos();
 }
 
 document.getElementById('abas').addEventListener('click', ev => {
@@ -1245,6 +1251,94 @@ async function carregarFerramentas() {
     const p = ev.target.dataset.path;
     const nome = (caixa.querySelector(`.mcp-liga[data-path="${p}"]`) || {}).dataset.nome;
     salvar(p, nome, true, ev.target.checked);
+  }));
+}
+
+function tamanhoLegivel(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+async function carregarArquivos() {
+  const caixa = document.getElementById('arquivos-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let d;
+  try { d = await (await fetch(`/clientes/${clienteAtualId}/midias`)).json(); }
+  catch (e) { caixa.textContent = 'falha ao listar os arquivos.'; return; }
+
+  const itens = d.midias || [];
+  const linhas = itens.map(i => `<tr>
+      <td>${escaparHtml(i.nome)}
+        ${i.em_disco ? '' : '<br><span class="opcional">arquivo sumiu do disco — suba de novo</span>'}
+        <br><small class="hint">${escaparHtml(i.nome_original)} · ${escaparHtml(i.mimetype)} · ${tamanhoLegivel(i.tamanho)}</small></td>
+      <td>${escaparHtml(i.descricao || '')}</td>
+      <td style="text-align:right">
+        <button type="button" class="handoff-botao arq-apagar" data-id="${i.id}"
+                data-nome="${escaparHtml(i.nome)}">apagar</button></td>
+    </tr>`).join('');
+
+  caixa.innerHTML = `
+    <p class="hint">Arquivos que o agente pode enviar pro paciente: vídeo de preparo,
+      PDF de orientação, tabela de preço. Ele escolhe pelo <strong>nome</strong> e só
+      entre os deste cliente — nunca por link, e nunca um arquivo de outro cliente.</p>
+    <table class="tabela-consumo">
+      <thead><tr><th>nome</th><th>quando usar</th><th></th></tr></thead>
+      <tbody>${linhas || '<tr><td colspan="3">nenhum arquivo cadastrado — o agente não oferece nada.</td></tr>'}</tbody>
+    </table>
+
+    <h3 style="margin-top:22px">Adicionar arquivo</h3>
+    <p class="hint">O nome é o que o agente lê pra decidir: "vídeo de preparo do exame"
+      funciona, "arquivo1" não. Em "quando usar", explique o caso — é o que evita ele
+      mandar na hora errada. Limite de 16 MB (teto do WhatsApp).</p>
+    <div class="linha" style="gap:8px; flex-wrap:wrap">
+      <input type="text" id="arq-nome" placeholder="nome (ex: preparo do exame)" style="max-width:220px">
+      <input type="text" id="arq-desc" placeholder="quando usar" style="max-width:240px">
+      <input type="file" id="arq-arquivo" style="max-width:230px">
+      <button type="button" class="handoff-botao" id="btn-add-arq">Enviar</button>
+    </div>
+    <div id="arquivos-aviso" class="opcional"></div>`;
+
+  document.getElementById('btn-add-arq').addEventListener('click', async (ev) => {
+    const b = ev.target, aviso = document.getElementById('arquivos-aviso');
+    const entrada = document.getElementById('arq-arquivo');
+    const arquivo = entrada.files && entrada.files[0];
+    if (!arquivo) { aviso.textContent = 'escolha um arquivo.'; return; }
+    b.disabled = true; aviso.textContent = 'enviando…';
+
+    // base64 porque o servidor é BaseHTTPRequestHandler e não analisa
+    // multipart; o acréscimo de ~33% cabe no limite de 16 MB.
+    const conteudo = await new Promise((resolve, reject) => {
+      const leitor = new FileReader();
+      leitor.onload = () => resolve(String(leitor.result).split(',')[1] || '');
+      leitor.onerror = reject;
+      leitor.readAsDataURL(arquivo);
+    });
+
+    const resp = await fetch(`/clientes/${clienteAtualId}/midias`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nome: document.getElementById('arq-nome').value,
+        descricao: document.getElementById('arq-desc').value,
+        nome_original: arquivo.name,
+        mimetype: arquivo.type || 'application/octet-stream',
+        conteudo,
+      }),
+    });
+    const r = await resp.json();
+    b.disabled = false;
+    if (!resp.ok) { aviso.textContent = r.error || 'falha ao enviar.'; return; }
+    aviso.textContent = '';
+    carregarArquivos();
+  });
+
+  caixa.querySelectorAll('.arq-apagar').forEach(x => x.addEventListener('click', async (ev) => {
+    const nome = ev.target.dataset.nome;
+    if (!confirm(`Apagar "${nome}"? O agente deixa de poder enviar este arquivo.`)) return;
+    await fetch(`/clientes/${clienteAtualId}/midias`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: Number(ev.target.dataset.id) }),
+    });
+    carregarArquivos();
   }));
 }
 

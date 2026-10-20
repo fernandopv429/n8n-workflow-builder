@@ -724,7 +724,104 @@ def teste_tipo_que_nao_lemos_tem_resposta_pronta():
         assert "?" in aviso, f"aviso sem saída pro paciente: {aviso!r}"
 
 
+def teste_ferramenta_de_arquivo_so_aceita_nome_do_catalogo():
+    """O modelo escolhe por nome, nunca por URL.
+
+    URL vinda do modelo é URL influenciada pelo texto do paciente — bastaria
+    "manda o arquivo em http://..." pra virar encaminhador de link."""
+    import db
+    import worker_agente as w
+
+    original = db.listar_midias_do_cliente
+    db.listar_midias_do_cliente = lambda cid: [
+        {"nome": "preparo do exame", "descricao": "antes da coleta"},
+        {"nome": "tabela de preço", "descricao": ""},
+    ]
+    try:
+        f = w._ferramenta_enviar_arquivo({"id": 1})["function"]
+        props = f["parameters"]["properties"]
+        assert set(props) == {"nome", "legenda"}, f"parâmetros demais: {sorted(props)}"
+        assert "url" not in props and "link" not in props, "aceitar URL é o que não pode"
+        assert props["nome"]["enum"] == ["preparo do exame", "tabela de preço"]
+        # a descrição precisa listar os itens: sem isso o modelo chuta o nome
+        assert "preparo do exame" in f["description"]
+    finally:
+        db.listar_midias_do_cliente = original
+
+
+def teste_sem_arquivo_cadastrado_a_ferramenta_nem_aparece():
+    """Ferramenta que só sabe falhar faz o modelo gastar rodada tentando."""
+    import db
+    import worker_agente as w
+    original = db.listar_midias_do_cliente
+    db.listar_midias_do_cliente = lambda cid: []
+    try:
+        assert w._ferramenta_enviar_arquivo({"id": 1}) is None
+    finally:
+        db.listar_midias_do_cliente = original
+
+
+def teste_envio_busca_o_arquivo_pelo_cliente_e_nao_pelos_argumentos():
+    """Arquivo de um cliente não pode sair pelo agente de outro.
+
+    O `cliente_id` chega de fora; se viesse nos argumentos, bastaria o modelo
+    pedir um nome que existe em outro cliente."""
+    import db
+    import worker_agente as w
+
+    vistos = []
+    original = db.obter_midia
+    db.obter_midia = lambda cid, nome: vistos.append((cid, nome)) or None
+    try:
+        r = w._executar("enviar_arquivo", {"nome": "tabela", "cliente_id": 999},
+                        {}, 7, 0, None, cliente={"evolution_instancia": "i"},
+                        contato={"id_whatsapp": "5511"})
+        assert "não existe arquivo" in r, r
+        assert vistos == [(7, "tabela")], f"consultou com {vistos}"
+    finally:
+        db.obter_midia = original
+
+
+def teste_tipo_de_midia_mapeia_o_que_o_whatsapp_espera():
+    """O Evolution recusa `mediatype` fora da lista dele."""
+    import evolution_client as e
+    assert e.tipo_de_midia("image/png") == "image"
+    assert e.tipo_de_midia("video/mp4") == "video"
+    assert e.tipo_de_midia("audio/ogg") == "audio"
+    # qualquer outra coisa vira documento, que aceita tudo
+    for m in ("application/pdf", "text/csv", "", None):
+        assert e.tipo_de_midia(m) == "document", m
+
+
+def teste_url_do_arquivo_falha_claro_sem_painel_url():
+    """Sem PAINEL_URL não dá pra montar o endereço que a Evolution baixa.
+
+    Falhar aqui é melhor que mandar um link que ninguém abre — o paciente
+    receberia um arquivo quebrado e nós não saberíamos."""
+    import os
+    import config
+    import midias
+    original = config.carregar_env
+    config.carregar_env = lambda: {}
+    anterior = os.environ.pop("PAINEL_URL", None)
+    try:
+        try:
+            midias.url_publica("abc")
+            assert False, "deveria ter falhado"
+        except RuntimeError as e:
+            assert "PAINEL_URL" in str(e)
+    finally:
+        config.carregar_env = original
+        if anterior is not None:
+            os.environ["PAINEL_URL"] = anterior
+
+
 TESTES = [
+    teste_ferramenta_de_arquivo_so_aceita_nome_do_catalogo,
+    teste_sem_arquivo_cadastrado_a_ferramenta_nem_aparece,
+    teste_envio_busca_o_arquivo_pelo_cliente_e_nao_pelos_argumentos,
+    teste_tipo_de_midia_mapeia_o_que_o_whatsapp_espera,
+    teste_url_do_arquivo_falha_claro_sem_painel_url,
     teste_normalizador_classifica_cada_tipo_de_midia,
     teste_grupo_e_eco_do_proprio_agente_continuam_descartados,
     teste_imagem_vira_texto_preservando_a_legenda,

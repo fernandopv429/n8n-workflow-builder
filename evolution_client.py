@@ -204,6 +204,40 @@ def obter_midia_base64(instancia: str, mensagem_id: str) -> str:
     return (d or {}).get("base64") or ""
 
 
+def tipo_de_midia(mimetype: str) -> str:
+    """O Evolution pede `mediatype` separado do mimetype, e recusa valor fora
+    da lista dele. Documento é o padrão: aceita qualquer coisa."""
+    m = (mimetype or "").lower()
+    if m.startswith("image/"):
+        return "image"
+    if m.startswith("video/"):
+        return "video"
+    if m.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
+def enviar_midia(instancia: str, numero: str, url: str, mimetype: str,
+                 legenda: str = "", nome_arquivo: str = "") -> dict:
+    """Manda arquivo por URL — a Evolution baixa sozinha.
+
+    Vai direto daqui, e não pelo trilho de saída do n8n: o node de envio de lá
+    é o da comunidade e só manda texto. Mandar a legenda na MESMA chamada
+    também evita a mídia chegar separada das bolhas de texto, que saem pela
+    fila e poderiam ultrapassá-la.
+    """
+    corpo = {
+        "number": numero,
+        "mediatype": tipo_de_midia(mimetype),
+        "mimetype": mimetype or "application/octet-stream",
+        "media": url,
+        "caption": legenda or "",
+    }
+    if nome_arquivo:
+        corpo["fileName"] = nome_arquivo
+    return _chamar("POST", f"/message/sendMedia/{urllib.parse.quote(instancia)}", corpo)
+
+
 def status(nome: str) -> str:
     try:
         d = _chamar("GET", f"/instance/connectionState/{urllib.parse.quote(nome)}")

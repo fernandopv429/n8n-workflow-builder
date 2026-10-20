@@ -48,7 +48,18 @@ services:
       - POCKETBASE_ADMIN_EMAIL=${POCKETBASE_ADMIN_EMAIL}
       - POCKETBASE_ADMIN_PASSWORD=${POCKETBASE_ADMIN_PASSWORD}
       - AGENTOPS_API_KEY=${AGENTOPS_API_KEY}
+      # Arquivos que o agente envia. PAINEL_URL é o endereço por onde a
+      # Evolution BAIXA o arquivo — ela roda em outro host, então caminho
+      # relativo não serve e sem isto o envio falha na hora de montar a URL.
+      - PAINEL_URL=${PAINEL_URL:-https://engine.a5ecossistema.tech}
+      - MIDIAS_DIR=/dados/midias
       - SOURCE_COMMIT=${SOURCE_COMMIT:-}
+    volumes:
+      # TEM que ser volume. Sem isto o contêiner é recriado no redeploy e todo
+      # arquivo enviado some, enquanto as linhas seguem no banco apontando pra
+      # nada — o agente então promete um PDF que não existe mais. A rota devolve
+      # 410 explicando exatamente isso, mas o estrago já aconteceu.
+      - midias:/dados/midias
     healthcheck:
       # /saude é a única rota sem autenticação, justamente pra isto. Devolve 503
       # quando o Postgres não responde, então container de pé com banco fora não
@@ -88,3 +99,6 @@ services:
         # O painel cria o schema do banco na subida (db.garantir_schema). Sem
         # esperar, o worker poderia consumir a fila antes das tabelas existirem.
         condition: service_healthy
+
+volumes:
+  midias:

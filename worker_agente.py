@@ -40,7 +40,8 @@ import config  # noqa: E402
 import db  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
-import evolution_client  # noqa: E402
+import evolution_client
+import midias  # noqa: E402
 import n8n_edicao  # noqa: E402
 
 FILA_ENTRADA = "agente.entrada"
@@ -309,10 +310,47 @@ def _ferramentas_dos_mcps(cliente: dict) -> tuple:
     return ferramentas, mapa
 
 
+def _ferramenta_enviar_arquivo(cliente: dict) -> dict | None:
+    """Ferramenta de enviar arquivo, montada com o catálogo DESTE cliente.
+
+    Os nomes entram como `enum`: o modelo escolhe entre o que existe, e não tem
+    como inventar nem receber uma URL. URL vinda do modelo é URL influenciada
+    pelo texto do paciente — e aí o agente vira um encaminhador de links.
+
+    Sem arquivo cadastrado a ferramenta nem aparece: oferecer uma ferramenta
+    que só sabe falhar faz o modelo tentar usá-la e gastar rodada.
+    """
+    itens = db.listar_midias_do_cliente(cliente["id"])
+    if not itens:
+        return None
+    catalogo = "; ".join(
+        f"'{i['nome']}'" + (f" ({i['descricao']})" if i["descricao"] else "")
+        for i in itens)
+    return {"type": "function", "function": {
+        "name": "enviar_arquivo",
+        "description": (
+            "Envia pro paciente um dos arquivos já cadastrados deste cliente "
+            "(vídeo, PDF, imagem). Use quando o arquivo responder melhor que "
+            "texto — orientação de preparo, tabela, localização. Disponíveis: "
+            f"{catalogo}."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "nome": {"type": "string", "enum": [i["nome"] for i in itens],
+                     "description": "O nome exato do arquivo a enviar."},
+            "legenda": {"type": "string",
+                        "description": "Uma frase curta que vai junto do arquivo."},
+        }, "required": ["nome"]},
+    }}
+
+
 def _ferramentas_do_agente(cliente: dict) -> tuple:
-    """Handoff + o que os MCPs do cliente oferecem. Devolve (lista, mapa)."""
+    """Handoff + arquivos + o que os MCPs do cliente oferecem. (lista, mapa)."""
     ferramentas, mapa = _ferramentas_dos_mcps(cliente)
-    return ferramentas + [FERRAMENTA_HUMANO], mapa
+    extras = [FERRAMENTA_HUMANO]
+    arquivo = _ferramenta_enviar_arquivo(cliente)
+    if arquivo:
+        extras.append(arquivo)
+    return ferramentas + extras, mapa
 
 
 def _system_prompt(cliente: dict) -> str:
@@ -396,7 +434,8 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
             except json.JSONDecodeError:
                 args = {}
             resultado = _executar(nome, args, credenciais, cliente["id"],
-                                  contato["id"], mapa_mcp)
+                                  contato["id"], mapa_mcp,
+                                  cliente=cliente, contato=contato)
             mensagens.append({
                 "role": "tool", "tool_call_id": chamada.id, "content": resultado[:4000]
             })
@@ -405,9 +444,37 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
 
 
 def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
-              contato_id: int = 0, mapa_mcp: dict | None = None) -> str:
+              contato_id: int = 0, mapa_mcp: dict | None = None,
+              cliente: dict | None = None, contato: dict | None = None) -> str:
     """Mesmas travas do painel: elas valem mais aqui, onde o pedido veio de fora."""
     try:
+        if nome == "enviar_arquivo":
+            # O cliente vem de fora, nunca dos argumentos: assim o arquivo de um
+            # cliente não pode ser enviado pelo agente de outro, nem se o modelo
+            # pedir por nome igual.
+            item = db.obter_midia(cliente_id, str(args.get("nome") or ""))
+            if not item:
+                return "erro: não existe arquivo com esse nome neste cliente"
+            instancia = (cliente or {}).get("evolution_instancia") or ""
+            numero = (contato or {}).get("id_whatsapp") or ""
+            if not instancia or not numero:
+                return "erro: sem instância do WhatsApp ou número do paciente"
+            try:
+                url = midias.url_publica(item["id_publico"])
+                evolution_client.enviar_midia(
+                    instancia, numero, url, item["mimetype"],
+                    str(args.get("legenda") or ""), item["nome_original"])
+            except Exception as e:  # noqa: BLE001 — Evolution fora, URL sem base
+                db.registrar_log(cliente_id, "erro",
+                                 f"[worker] falha ao enviar '{item['nome']}': {e}")
+                return f"erro ao enviar o arquivo: {str(e)[:200]}"
+            db.registrar_log(cliente_id, "sistema",
+                             f"[worker] arquivo '{item['nome']}' enviado para {numero}.")
+            # o modelo precisa saber que JÁ foi: senão descreve o arquivo em
+            # texto como se ainda fosse mandar, ou manda de novo
+            return (f"ok: '{item['nome']}' foi enviado agora para o paciente. "
+                    "Não descreva o conteúdo nem envie de novo; comente em uma frase.")
+
         if nome == "chamar_humano":
             motivo = str(args.get("motivo") or "sem motivo informado")
             db.definir_status_contato(contato_id, "HUMANO")

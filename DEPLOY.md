@@ -67,6 +67,30 @@ O worker continua sendo um processo separado: redeploy do painel não derruba
 conversa de paciente, e a `OPENAI_ADMIN_KEY` não entra no processo que lê texto
 escrito por desconhecido no WhatsApp (ver comentários no próprio compose).
 
+## Arquivos que o agente envia
+
+Duas variáveis novas, já no compose com padrão:
+
+```
+PAINEL_URL=https://engine.a5ecossistema.tech
+MIDIAS_DIR=/dados/midias
+```
+
+`PAINEL_URL` é por onde a **Evolution baixa** o arquivo. Ela roda em outro host,
+então caminho relativo não serve; sem isso o envio falha ao montar a URL — e
+falha explicitamente, de propósito, em vez de mandar um link que ninguém abre.
+
+A rota `/midias/<id>` fica **fora da senha do painel**, porque a Evolution não
+sabe autenticar. O que protege é o id aleatório de 32 caracteres: não há rota
+que liste e não dá pra adivinhar. Serve material de divulgação — orientação,
+preço, vídeo institucional — não documento sigiloso de paciente.
+
+`MIDIAS_DIR` **precisa ser volume** (o compose já declara `midias:`). Sem
+volume, o redeploy recria o contêiner, os arquivos somem e as linhas continuam
+no banco apontando pra nada: a tela mostra o item, o agente promete o PDF e a
+Evolution não baixa. A rota devolve 410 dizendo exatamente isso, e a aba
+Arquivos marca "arquivo sumiu do disco" — mas o estrago já aconteceu.
+
 **O domínio em Docker Compose vai por variável, não pelo campo Domains.** O
 Coolify ignora aquele campo nesse build pack e usa
 `SERVICE_FQDN_<serviço>_<porta>`. Para o painel:

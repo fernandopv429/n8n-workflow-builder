@@ -176,6 +176,29 @@ def garantir_schema():
             )
         """)
 
+        # Arquivos que o agente pode ENVIAR: vídeo de preparo de exame, PDF de
+        # orientação, tabela de preço. O agente escolhe pelo `nome`, nunca por
+        # URL — URL vinda do modelo é URL influenciada pelo texto do paciente.
+        #
+        # `arquivo` é o caminho em disco, com um `id_publico` impossível de
+        # adivinhar na URL: a Evolution precisa BAIXAR o arquivo e não sabe
+        # autenticar no painel, então a rota fica fora da senha.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cliente_midias (
+                id SERIAL PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                nome TEXT NOT NULL,
+                descricao TEXT NOT NULL DEFAULT '',
+                id_publico TEXT NOT NULL UNIQUE,
+                arquivo TEXT NOT NULL,
+                nome_original TEXT NOT NULL,
+                mimetype TEXT NOT NULL,
+                tamanho INTEGER NOT NULL DEFAULT 0,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (cliente_id, nome)
+            )
+        """)
+
         # Agente geral: um número da A5 por onde o PRÓPRIO CLIENTE pede mudanças
         # no agente dele ("troca meu prompt", "desliga"). Nada a ver com o
         # atendimento ao paciente.
@@ -741,6 +764,71 @@ def salvar_demandante(id_whatsapp: str, cliente_id: int, nome: str = "", ativo: 
 def remover_demandante(id_whatsapp: str):
     with _conectar() as conn:
         conn.execute("DELETE FROM demandantes WHERE id_whatsapp = %s", (id_whatsapp,))
+
+
+def listar_midias_do_cliente(cliente_id: int) -> list:
+    """Arquivos cadastrados deste cliente. Só dele — item de um cliente nunca
+    pode ser oferecido ao agente de outro."""
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT id, nome, descricao, id_publico, arquivo, nome_original, "
+            "mimetype, tamanho FROM cliente_midias WHERE cliente_id = %s ORDER BY nome",
+            (cliente_id,))
+        colunas = [d[0] for d in cur.description]
+        return [dict(zip(colunas, linha)) for linha in cur.fetchall()]
+
+
+def obter_midia(cliente_id: int, nome: str) -> dict | None:
+    """Busca por nome DENTRO do cliente: é assim que a ferramenta do agente
+    resolve o que enviar, e o cliente_id não vem do modelo."""
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT id, nome, descricao, id_publico, arquivo, nome_original, "
+            "mimetype, tamanho FROM cliente_midias "
+            "WHERE cliente_id = %s AND lower(nome) = lower(%s)", (cliente_id, nome))
+        linha = cur.fetchone()
+        if not linha:
+            return None
+        return dict(zip([d[0] for d in cur.description], linha))
+
+
+def obter_midia_por_id_publico(id_publico: str) -> dict | None:
+    """Usada pela rota pública que serve o arquivo pra Evolution baixar."""
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT cliente_id, arquivo, nome_original, mimetype "
+            "FROM cliente_midias WHERE id_publico = %s", (id_publico,))
+        linha = cur.fetchone()
+        return dict(zip([d[0] for d in cur.description], linha)) if linha else None
+
+
+def salvar_midia(cliente_id: int, nome: str, descricao: str, id_publico: str,
+                 arquivo: str, nome_original: str, mimetype: str, tamanho: int) -> dict:
+    with _conectar() as conn:
+        cur = conn.execute(
+            """INSERT INTO cliente_midias (cliente_id, nome, descricao, id_publico,
+                   arquivo, nome_original, mimetype, tamanho)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (cliente_id, nome) DO UPDATE SET
+                   descricao = EXCLUDED.descricao, id_publico = EXCLUDED.id_publico,
+                   arquivo = EXCLUDED.arquivo, nome_original = EXCLUDED.nome_original,
+                   mimetype = EXCLUDED.mimetype, tamanho = EXCLUDED.tamanho
+               RETURNING id, arquivo""",
+            (cliente_id, nome, descricao, id_publico, arquivo, nome_original,
+             mimetype, tamanho))
+        linha = cur.fetchone()
+        return {"id": linha[0], "arquivo": linha[1]}
+
+
+def apagar_midia(cliente_id: int, midia_id: int) -> str:
+    """Devolve o caminho do arquivo pra quem chamou apagar do disco também —
+    linha removida com arquivo órfão enche o volume em silêncio."""
+    with _conectar() as conn:
+        cur = conn.execute(
+            "DELETE FROM cliente_midias WHERE cliente_id = %s AND id = %s "
+            "RETURNING arquivo", (cliente_id, midia_id))
+        linha = cur.fetchone()
+        return linha[0] if linha else ""
 
 
 def listar_mcps_do_cliente(cliente_id: int, so_ativos: bool = False,
