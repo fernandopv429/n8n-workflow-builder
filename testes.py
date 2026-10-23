@@ -817,7 +817,46 @@ def teste_arquivo_grande_demais_e_barrado_antes_de_subir():
         assert "limite do WhatsApp" in str(e), str(e)
 
 
+def teste_delay_das_bolhas_e_crescente_pra_manter_a_ordem():
+    """O rabbitmqTrigger processa em paralelo por padrão.
+
+    Com delay individual, a bolha curta teria espera menor e chegaria ANTES da
+    primeira — a resposta sairia embaralhada no WhatsApp do paciente. Por isso
+    o delay é acumulado, e o teste tranca justamente a monotonia."""
+    import worker_agente as w
+
+    # a segunda bolha é a mais curta de propósito: é o caso que inverte
+    partes = ["Bom dia! Tudo bem com você?", "Sim.", "Posso agendar pra amanhã de manhã?"]
+    d = w.delays_das_bolhas(partes)
+    assert len(d) == len(partes)
+    for anterior, seguinte in zip(d, d[1:]):
+        assert seguinte > anterior, f"delay não cresceu: {d}"
+
+
+def teste_delay_respeita_piso_teto_e_total():
+    """Piso: ninguém responde instantaneamente. Teto: texto longo não justifica
+    sumiço, e a soma não pode travar a conversa."""
+    import worker_agente as w
+
+    assert w.tempo_de_digitacao("") == w.DELAY_MINIMO_MS
+    assert w.tempo_de_digitacao("oi") == w.DELAY_MINIMO_MS
+    assert w.tempo_de_digitacao("x" * 10000) == w.DELAY_MAXIMO_MS
+    # dez parágrafos longos não podem deixar o paciente meio minuto no vácuo
+    d = w.delays_das_bolhas(["x" * 500] * 10)
+    assert d[-1] == w.DELAY_TOTAL_MAXIMO_MS, d[-1]
+
+
+def teste_delay_de_uma_bolha_so_e_o_tempo_dela():
+    """A resposta de um parágrafo é o caso comum: não pode herdar acúmulo."""
+    import worker_agente as w
+    texto = "O preparo pede jejum de 8 horas."
+    assert w.delays_das_bolhas([texto]) == [w.tempo_de_digitacao(texto)]
+
+
 TESTES = [
+    teste_delay_das_bolhas_e_crescente_pra_manter_a_ordem,
+    teste_delay_respeita_piso_teto_e_total,
+    teste_delay_de_uma_bolha_so_e_o_tempo_dela,
     teste_ferramenta_de_arquivo_so_aceita_nome_do_catalogo,
     teste_sem_arquivo_cadastrado_a_ferramenta_nem_aparece,
     teste_envio_busca_o_arquivo_pelo_cliente_e_nao_pelos_argumentos,

@@ -66,6 +66,43 @@ COMANDOS_RESET = {"reset"}
 RESPOSTA_RESET = "Reset concluído! Vamos do começo."
 
 
+# Delay de digitação (campo `delay` do Evolution, em milissegundos).
+#
+# ~45 ms por caractere dá algo entre 20 e 25 palavras por minuto — ritmo de
+# quem digita no celular com atenção. Mais rápido que isso denuncia robô;
+# muito mais lento faz o paciente achar que ninguém viu a mensagem.
+MS_POR_CARACTERE = 45
+DELAY_MINIMO_MS = 900      # ninguém responde instantaneamente
+DELAY_MAXIMO_MS = 6000     # por bolha: texto longo não justifica sumiço
+DELAY_TOTAL_MAXIMO_MS = 15000  # teto da resposta inteira
+
+
+def tempo_de_digitacao(texto: str) -> int:
+    """Quanto tempo uma pessoa levaria pra digitar este texto, em ms."""
+    bruto = len(texto or "") * MS_POR_CARACTERE
+    return max(DELAY_MINIMO_MS, min(bruto, DELAY_MAXIMO_MS))
+
+
+def delays_das_bolhas(partes: list) -> list:
+    """Delay de CADA bolha, acumulado — não o tempo individual dela.
+
+    O `rabbitmqTrigger` do n8n processa em paralelo por padrão (a fila de saída
+    está com `options: {}`). Cada bolha vira uma execução que começa junto com
+    as outras, então um delay individual faria todas saírem quase ao mesmo
+    tempo — e FORA DE ORDEM, porque a bolha mais curta tem delay menor e
+    ultrapassa a primeira. Acumulando, a bolha 2 espera o tempo da 1 mais o
+    dela, e a ordem se mantém mesmo com execuções concorrentes.
+
+    O teto total existe porque o acúmulo cresce rápido: três parágrafos longos
+    passariam de meio minuto de silêncio.
+    """
+    delays, acumulado = [], 0
+    for parte in partes:
+        acumulado = min(acumulado + tempo_de_digitacao(parte), DELAY_TOTAL_MAXIMO_MS)
+        delays.append(acumulado)
+    return delays
+
+
 def _quebrar_mensagem(texto: str) -> list:
     """Separa a resposta em várias bolhas, uma por parágrafo, em vez de um
     bloco só. O modelo já separa ideias por linha em branco quando escreve
@@ -735,9 +772,12 @@ def rodar(uma_so: bool = False):
                 # Uma entrada na fila = uma mensagem no WhatsApp (ver "Enviar
                 # texto" no A5 Trilho - Saida), então quebrar em várias bolhas
                 # é publicar várias entradas, uma por parágrafo da resposta.
-                for parte in _quebrar_mensagem(saida.get("texto", "")):
+                partes = _quebrar_mensagem(saida.get("texto", ""))
+                for parte, espera in zip(partes, delays_das_bolhas(partes)):
                     canal.basic_publish(
-                        "", FILA_SAIDA, json.dumps({**saida, "texto": parte}, ensure_ascii=False),
+                        "", FILA_SAIDA,
+                        json.dumps({**saida, "texto": parte, "delay": espera},
+                                   ensure_ascii=False),
                         properties=pika.BasicProperties(delivery_mode=2),
                     )
             canal.basic_ack(metodo.delivery_tag)       # só depois de publicar

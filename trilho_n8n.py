@@ -262,7 +262,14 @@ def _workflow_saida(cred_id: str) -> dict:
                     "instanceName": "={{ $json.content ? JSON.parse($json.content).instancia : $json.instancia }}",
                     "remoteJid": "={{ $json.content ? JSON.parse($json.content).id_whatsapp : $json.id_whatsapp }}",
                     "messageText": "={{ $json.content ? JSON.parse($json.content).texto : $json.texto }}",
-                    "options_message": {},
+                    # Delay de digitação, em ms, calculado no worker (ver
+                    # `delays_das_bolhas`). É ACUMULADO: este trigger processa
+                    # em paralelo por padrão, então delay individual faria as
+                    # bolhas saírem juntas e fora de ordem.
+                    "options_message": {
+                        "delay": "={{ ($json.content ? JSON.parse($json.content).delay "
+                                 ": $json.delay) || 1200 }}",
+                    },
                 },
                 # A credencial do Evolution é COMPARTILHADA entre os clientes —
                 # quem separa um do outro é a `instanceName` acima, que vem da
