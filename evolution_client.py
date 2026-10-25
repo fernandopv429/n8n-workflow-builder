@@ -125,6 +125,12 @@ def criar_instancia(nome: str) -> dict:
         "instanceName": nome,
         "qrcode": True,
         "integration": "WHATSAPP-BAILEYS",
+        # Sem isso, o agente tentaria "atender" qualquer mensagem solta de
+        # grupo como se fosse paciente — e o a5-central vai estar DENTRO de
+        # grupo de propósito, pra mandar o resumo periódico (ver resumo de
+        # atendimento). O trilho (trilho_n8n.py) já filtra mensagem de grupo
+        # antes de publicar na fila, mas isso aqui evita até o evento chegar.
+        "groupsIgnore": True,
         "webhook": {
             "url": url_do_trilho(),
             "byEvents": False,   # um endpoint só; quem separa evento é o trilho
@@ -133,6 +139,15 @@ def criar_instancia(nome: str) -> dict:
         },
     }
     d = _chamar("POST", "/instance/create", corpo)
+
+    # Nem toda versão da Evolution aplica groupsIgnore já na criação (ver
+    # comentário de versão no topo do arquivo) — reforça com uma chamada
+    # dedicada, que é o jeito garantido de mudar essa configuração.
+    try:
+        _chamar("POST", f"/settings/set/{urllib.parse.quote(nome)}", {"groupsIgnore": True})
+    except EvolutionError:
+        pass  # instância já foi criada; não travar o fluxo por causa disto
+
     qr = d.get("qrcode") or {}
     base64_qr = qr.get("base64") or ""
     codigo_qr = qr.get("code") or ""
