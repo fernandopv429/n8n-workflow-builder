@@ -853,7 +853,41 @@ def teste_delay_de_uma_bolha_so_e_o_tempo_dela():
     assert w.delays_das_bolhas([texto]) == [w.tempo_de_digitacao(texto)]
 
 
+def teste_instancia_nasce_ignorando_grupos():
+    """Instância criada sem `groupsIgnore` responde no grupo da clínica.
+
+    O trilho já descarta `@g.us`, mas enquanto a Evolution entregar mensagem de
+    grupo no webhook, qualquer caminho novo que esqueça o filtro reabre o
+    problema. Era corrigido na mão a cada instância criada."""
+    import evolution_client as e
+
+    chamadas = []
+
+    def falso(metodo, caminho, corpo=None):
+        chamadas.append((metodo, caminho, corpo))
+        if caminho == "/instance/create":
+            return {"instance": {"status": "connecting"},
+                    "qrcode": {"base64": "x", "code": "y"}}
+        return {}
+
+    original = e._chamar
+    e._chamar = falso
+    try:
+        e.criar_instancia("teste")
+    finally:
+        e._chamar = original
+
+    criacao = [c for c in chamadas if c[1] == "/instance/create"][0]
+    assert criacao[2].get("groupsIgnore") is True, "criação sem groupsIgnore"
+    # e reenviado em settings/set: nem toda versão da Evolution honra os
+    # campos de configuração vindos no /instance/create
+    ajuste = [c for c in chamadas if c[1].startswith("/settings/set/")]
+    assert ajuste, "configurações não foram reenviadas após criar"
+    assert ajuste[0][2].get("groupsIgnore") is True
+
+
 TESTES = [
+    teste_instancia_nasce_ignorando_grupos,
     teste_delay_das_bolhas_e_crescente_pra_manter_a_ordem,
     teste_delay_respeita_piso_teto_e_total,
     teste_delay_de_uma_bolha_so_e_o_tempo_dela,

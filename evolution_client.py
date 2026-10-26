@@ -114,6 +114,26 @@ def listar_grupos(nome_instancia: str) -> list:
     return [{"id": g.get("id"), "nome": g.get("subject") or g.get("id")} for g in itens if g.get("id")]
 
 
+# Configurações de instância aplicadas sempre. `/instance/create` aceita estes
+# campos direto, mas nem toda versão da Evolution os honra na criação — por
+# isso são reenviados em `/settings/set` logo depois.
+CONFIGURACOES = {
+    "groupsIgnore": True,     # agente não responde em grupo
+    "readStatus": False,      # não marca "visto" nos status alheios
+    "syncFullHistory": False, # histórico antigo inteiro inundaria o webhook
+}
+
+
+def definir_configuracoes(nome: str) -> dict:
+    """Aplica as configurações numa instância que já existe."""
+    return _chamar("POST", f"/settings/set/{urllib.parse.quote(nome)}",
+                   dict(CONFIGURACOES))
+
+
+def ler_configuracoes(nome: str) -> dict:
+    return _chamar("GET", f"/settings/find/{urllib.parse.quote(nome)}") or {}
+
+
 def criar_instancia(nome: str) -> dict:
     """Cria a instância JÁ com o webhook do trilho apontado.
 
@@ -125,12 +145,17 @@ def criar_instancia(nome: str) -> dict:
         "instanceName": nome,
         "qrcode": True,
         "integration": "WHATSAPP-BAILEYS",
-        # Sem isso, o agente tentaria "atender" qualquer mensagem solta de
-        # grupo como se fosse paciente — e o a5-central vai estar DENTRO de
-        # grupo de propósito, pra mandar o resumo periódico (ver resumo de
-        # atendimento). O trilho (trilho_n8n.py) já filtra mensagem de grupo
-        # antes de publicar na fila, mas isso aqui evita até o evento chegar.
-        "groupsIgnore": True,
+        # Grupos ficam de fora desde a criação. O trilho já descarta `@g.us`,
+        # mas isso é o segundo muro: a instância do cliente costuma estar em
+        # grupo de equipe e de fornecedor, e enquanto a Evolution entregar
+        # mensagem de grupo no webhook, qualquer caminho novo que esqueça o
+        # filtro vira o agente respondendo no grupo da clínica. Era feito na
+        # mão a cada instância criada (pedido do Fernando, 20/10/2026).
+        #
+        # Bloqueia o que a instância RECEBE, não o que envia: o a5-central fica
+        # dentro de grupo de propósito, pra mandar o resumo periódico de
+        # atendimento, e isso continua funcionando.
+        **CONFIGURACOES,
         "webhook": {
             "url": url_do_trilho(),
             "byEvents": False,   # um endpoint só; quem separa evento é o trilho
@@ -140,13 +165,13 @@ def criar_instancia(nome: str) -> dict:
     }
     d = _chamar("POST", "/instance/create", corpo)
 
-    # Nem toda versão da Evolution aplica groupsIgnore já na criação (ver
-    # comentário de versão no topo do arquivo) — reforça com uma chamada
-    # dedicada, que é o jeito garantido de mudar essa configuração.
+    # Reenvio das configurações: nem toda versão da Evolution as aplica já na
+    # criação, e aí a instância nasceria ouvindo grupo — o sintoma só aparece
+    # quando alguém escreve num grupo, longe daqui, já com o cliente usando.
     try:
-        _chamar("POST", f"/settings/set/{urllib.parse.quote(nome)}", {"groupsIgnore": True})
+        definir_configuracoes(nome)
     except EvolutionError:
-        pass  # instância já foi criada; não travar o fluxo por causa disto
+        pass  # a instância existe; a próxima conexão pelo painel reaplica
 
     qr = d.get("qrcode") or {}
     base64_qr = qr.get("base64") or ""
