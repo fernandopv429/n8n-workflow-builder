@@ -932,6 +932,7 @@ async function carregarWhatsapp() {
         não vai pro agente. Clique abaixo para corrigir.</div>`}
       <button type="button" class="handoff-botao" id="btn-criar-wpp">
         ${ok ? 'Reapontar o webhook' : 'Conectar (mostrar QR)'}</button>
+      ${ok ? '<button type="button" class="handoff-botao" id="btn-desconectar-wpp">Desconectar</button>' : ''}
       <div id="wpp-qr"></div>`;
   }
 
@@ -956,6 +957,21 @@ async function carregarWhatsapp() {
     mostrarQr(r);
     b.textContent = 'Gerar outro QR';
   });
+
+  const btnDesconectar = document.getElementById('btn-desconectar-wpp');
+  if (btnDesconectar) {
+    btnDesconectar.addEventListener('click', async (ev) => {
+      if (!confirm('Desconectar o WhatsApp deste cliente? O paciente vai parar de '
+        + 'ser atendido até alguém escanear o QR de novo — o cadastro e o histórico '
+        + 'continuam intactos.')) return;
+      const b = ev.target; b.disabled = true; b.textContent = 'desconectando…';
+      const resp = await fetch(`/clientes/${clienteAtualId}/whatsapp/desconectar`, { method: 'POST' });
+      const r = await resp.json();
+      if (!resp.ok) { b.disabled = false; b.textContent = `erro: ${r.error}`; return; }
+      carregarLogs();
+      carregarWhatsapp();
+    });
+  }
 }
 
 // --- Agente geral ----------------------------------------------------------
@@ -1017,6 +1033,7 @@ async function carregarGeral() {
       <span class="opcional">${escaparHtml(d.instancia || 'nenhuma instância')}</span></div>
     <button type="button" class="handoff-botao" id="btn-conectar-geral">
       ${conectado ? 'Reapontar o webhook' : 'Conectar (mostrar QR)'}</button>
+    ${conectado ? '<button type="button" class="handoff-botao" id="btn-desconectar-geral">Desconectar</button>' : ''}
     <div id="wpp-qr-geral"></div>
 
     <h3 style="margin-top:22px">Quem pode pedir, e por qual cliente</h3>
@@ -1077,6 +1094,19 @@ async function carregarGeral() {
     mostrarQrGeral(r);
     b.textContent = 'Gerar outro QR';
   });
+
+  const btnDesconectarGeral = document.getElementById('btn-desconectar-geral');
+  if (btnDesconectarGeral) {
+    btnDesconectarGeral.addEventListener('click', async (ev) => {
+      if (!confirm('Desconectar o WhatsApp do a5-central? Os demandantes param de '
+        + 'conseguir pedir mudança no agente deles até alguém escanear o QR de novo.')) return;
+      const b = ev.target; b.disabled = true; b.textContent = 'desconectando…';
+      const resp = await fetch('/geral/desconectar', { method: 'POST' });
+      const r = await resp.json();
+      if (!resp.ok) { b.disabled = false; b.textContent = `erro: ${r.error}`; return; }
+      carregarGeral();
+    });
+  }
 
   document.getElementById('btn-add-dem').addEventListener('click', async () => {
     const aviso = document.getElementById('geral-aviso');

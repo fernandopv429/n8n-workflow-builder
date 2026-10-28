@@ -95,6 +95,7 @@ ROTA_CLIENTE_RESTAURAR_PROMPT = re.compile(r"^/clientes/(\d+)/restaurar-prompt$"
 # mais esquecido era o webhook — instância conectada sem webhook recebe
 # mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
 ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
+ROTA_CLIENTE_WHATSAPP_DESCONECTAR = re.compile(r"^/clientes/(\d+)/whatsapp/desconectar$")
 ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
 # Resumo periódico de atendimento, mandado num grupo do WhatsApp por cliente
 # (quem dispara o envio é um Schedule Trigger no n8n, chamando estas rotas).
@@ -110,6 +111,7 @@ ROTA_GERAL_DEMANDANTES = re.compile(r"^/geral/demandantes$")
 # Grupos que a instância do agente geral participa — pra escolher o destino
 # do resumo periódico de atendimento sem caçar JID na mão (ver index.html).
 ROTA_GERAL_GRUPOS = re.compile(r"^/geral/grupos$")
+ROTA_GERAL_DESCONECTAR = re.compile(r"^/geral/desconectar$")
 ROTA_MCPS_CATALOGO = re.compile(r"^/mcps$")
 ROTA_CLIENTE_MCPS = re.compile(r"^/clientes/(\d+)/mcps$")
 # Arquivos que o agente envia. O arquivo em si fica no PocketBase, com leitura
@@ -470,6 +472,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._responder_json(502, {"error": str(e)})
                 return
 
+        if ROTA_GERAL_DESCONECTAR.match(self.path):
+            nome = agente_geral.instancia_configurada()
+            if not nome or not evolution_client.disponivel():
+                self._responder_json(400, {"error": "a5-central não tem WhatsApp conectado"})
+                return
+            try:
+                evolution_client.desconectar_instancia(nome)
+            except evolution_client.EvolutionError as e:
+                self._responder_json(502, {"error": str(e)})
+                return
+            self._responder_json(200, {"desconectado": True})
+            return
+
         if ROTA_GERAL_DEMANDANTES.match(self.path):
             corpo = self._ler_corpo()
             tel = "".join(ch for ch in str(corpo.get("id_whatsapp", "")) if ch.isdigit())
@@ -623,6 +638,30 @@ class Handler(BaseHTTPRequestHandler):
                 "O consumo deste cliente passa a ser medido separado.")
             self._responder_json(200, {"projeto_id": criado["projeto_id"],
                                        "projeto_nome": criado["projeto_nome"]})
+            return
+
+        m = ROTA_CLIENTE_WHATSAPP_DESCONECTAR.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            cliente = db.obter_cliente(cliente_id)
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            nome = cliente.get("evolution_instancia")
+            if not nome or not evolution_client.disponivel():
+                self._responder_json(400, {"error": "este cliente não tem WhatsApp conectado"})
+                return
+            try:
+                evolution_client.desconectar_instancia(nome)
+            except evolution_client.EvolutionError as e:
+                db.registrar_log(cliente_id, "erro", f"Falha ao desconectar WhatsApp: {e}")
+                self._responder_json(502, {"error": str(e)})
+                return
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"WhatsApp ('{nome}') desconectado manualmente pelo painel — o cadastro e o "
+                "histórico continuam, só falta escanear o QR de novo pra reconectar.")
+            self._responder_json(200, {"desconectado": True})
             return
 
         m = ROTA_CLIENTE_WHATSAPP.match(self.path)

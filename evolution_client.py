@@ -286,6 +286,13 @@ def status(nome: str) -> str:
     return ((d or {}).get("instance") or {}).get("state") or "desconhecido"
 
 
+def desconectar_instancia(nome: str) -> dict:
+    """Desloga o WhatsApp SEM apagar a instância nem o histórico — diferente de
+    `remover_instancia`. Serve pra forçar reconexão (celular trocado, sessão
+    travada) sem perder nada: depois é só escanear o QR de novo pelo painel."""
+    return _chamar("DELETE", f"/instance/logout/{urllib.parse.quote(nome)}")
+
+
 def remover_instancia(nome: str) -> dict:
     """Desconecta e apaga. Usado quando o cliente sai — instância órfã continua
     conectada ao WhatsApp dele, recebendo mensagem que ninguém lê."""
