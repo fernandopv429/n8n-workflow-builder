@@ -886,7 +886,71 @@ def teste_instancia_nasce_ignorando_grupos():
     assert ajuste[0][2].get("groupsIgnore") is True
 
 
+def teste_mcp_local_tem_o_mesmo_contrato_do_n8n():
+    """Trocar o MCP do n8n pelo local tem que ser mudar o caminho, nada mais.
+
+    Se um nome de ferramenta ou de parâmetro divergir, a troca quebra o agente
+    de um jeito que só aparece em produção, no meio de um atendimento."""
+    import inspect
+    import mcp_kommo_cartao as m
+
+    esperado = {
+        "consultar_cartao_lead": {"kommo_domain", "access_token", "lead_id"},
+        "mover_lead": {"kommo_domain", "access_token", "lead_id", "status_id",
+                       "pipeline_id"},
+        "atualizar_campo_personalizado": {"kommo_domain", "access_token",
+                                          "lead_id", "field_id", "valor"},
+        "adicionar_tag": {"kommo_domain", "access_token", "lead_id", "tag_novo",
+                          "tags_atuais"},
+        "remover_tag": {"kommo_domain", "access_token", "lead_id", "tag_remover",
+                        "tags_atuais"},
+        "adicionar_nota": {"kommo_domain", "access_token", "lead_id", "texto"},
+        "criar_tarefa": {"kommo_domain", "access_token", "lead_id", "texto",
+                         "prazo_horas"},
+    }
+    for nome, params in esperado.items():
+        fn = getattr(m, nome, None)
+        assert fn is not None, f"ferramenta '{nome}' sumiu"
+        assert set(inspect.signature(fn).parameters) == params, (
+            f"{nome}: {sorted(inspect.signature(fn).parameters)}")
+
+
+def teste_tags_preservam_as_existentes():
+    """O PATCH do Kommo substitui a lista INTEIRA de tags.
+
+    Mandar só a tag nova apaga todas as outras — é a armadilha que a descrição
+    da ferramenta avisa, e aqui ela vira comportamento testado."""
+    import mcp_kommo_cartao as m
+
+    assert m.juntar_tags("vip, urgente", "novo") == ["vip", "urgente", "novo"]
+    # duplicata não entra, mesmo com caixa diferente
+    assert m.juntar_tags("vip, urgente", "VIP") == ["vip", "urgente"]
+    assert m.juntar_tags("", "primeira") == ["primeira"]
+    # remover compara sem diferenciar maiúscula, e preserva as demais
+    assert m.tirar_tag("vip, urgente, novo", "URGENTE") == ["vip", "novo"]
+    assert m.tirar_tag("vip", "nao-existe") == ["vip"]
+    assert m.tirar_tag("", "qualquer") == []
+
+
+def teste_erro_do_kommo_chega_legivel_no_modelo():
+    """O SDK devolveria só "Error executing tool <nome>", engolindo o corpo da
+    resposta — onde vêm `path` e `code` do campo recusado. Mesma falha que o
+    `neverError` resolveu do lado do n8n."""
+    import mcp_kommo_cartao as m
+
+    @m._legivel
+    def explode(x):
+        raise RuntimeError("Kommo respondeu 400: campo status_id inválido")
+
+    r = explode(1)
+    assert r.startswith("erro: "), r
+    assert "status_id" in r, "o detalhe do Kommo se perdeu"
+
+
 TESTES = [
+    teste_mcp_local_tem_o_mesmo_contrato_do_n8n,
+    teste_tags_preservam_as_existentes,
+    teste_erro_do_kommo_chega_legivel_no_modelo,
     teste_instancia_nasce_ignorando_grupos,
     teste_delay_das_bolhas_e_crescente_pra_manter_a_ordem,
     teste_delay_respeita_piso_teto_e_total,
