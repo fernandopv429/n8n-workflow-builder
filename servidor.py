@@ -90,6 +90,7 @@ ROTA_CONTATO_RESET = re.compile(r"^/contatos/(\d+)/reset$")
 ROTA_FILA = re.compile(r"^/fila$")
 ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
 ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
+ROTA_CLIENTE_RESTAURAR_PROMPT = re.compile(r"^/clientes/(\d+)/restaurar-prompt$")
 # WhatsApp: criar a instância e conectar pelo QR, sem sair do painel. O passo
 # mais esquecido era o webhook — instância conectada sem webhook recebe
 # mensagem e não entrega a ninguém, o que parece "o agente não respondeu".
@@ -675,6 +676,20 @@ class Handler(BaseHTTPRequestHandler):
         m = ROTA_CLIENTE_APLICAR_PROMPT.match(self.path)
         if m:
             self._aplicar_prompt_sugerido(int(m.group(1)))
+            return
+
+        m = ROTA_CLIENTE_RESTAURAR_PROMPT.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            if not db.restaurar_prompt_anterior(cliente_id):
+                self._responder_json(400, {"error": "não há versão anterior pra restaurar"})
+                return
+            db.registrar_log(cliente_id, "sistema",
+                             "Prompt restaurado pra versão anterior, pelo painel.")
+            self._responder_json(200, {"restaurado": True})
             return
 
         m = ROTA_CLIENTE_IMAGEM.match(self.path)

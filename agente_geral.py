@@ -78,6 +78,16 @@ FERRAMENTAS = [
             "required": ["novo_prompt"]},
     }},
     {"type": "function", "function": {
+        "name": "restaurar_prompt_anterior",
+        "description": (
+            "Desfaz a ÚLTIMA troca de prompt, voltando pro texto de antes. Use "
+            "quando a pessoa pedir pra desfazer, voltar atrás, ou disser que o "
+            "prompt novo ficou ruim. Chamar de novo desfaz o desfazer (dá pra "
+            "ir e voltar entre as duas últimas versões)."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
         "name": "ligar_agente",
         "description": "Liga o agente: ele volta a responder os pacientes.",
         "parameters": {"type": "object", "properties": {}},
@@ -104,7 +114,12 @@ def _system_prompt(demandante: dict) -> str:
         f"{AVISO_INJECAO}\n\n"
         "COMO AGIR:\n"
         "- Antes de trocar o prompt, leia o atual, mostre como vai ficar e espere "
-        "a confirmação. É destrutivo: apaga o texto anterior.\n"
+        "a confirmação. A troca fica guardada e dá pra desfazer com "
+        "restaurar_prompt_anterior, mas só a última — não existe um histórico "
+        "inteiro, então ainda vale confirmar antes de trocar.\n"
+        "- Se a pessoa disser que o prompt novo ficou ruim ou pedir pra voltar "
+        "atrás, use restaurar_prompt_anterior — não peça pra ela reescrever do "
+        "zero.\n"
         "- Desligar e ligar pode fazer direto — é reversível num comando.\n"
         "- Se pedirem algo fora dessas ferramentas (mudar credencial, apagar "
         "cliente, mexer em funil, falar de outro cliente), diga que isso passa "
@@ -139,12 +154,21 @@ def _executar(nome: str, args: dict, demandante: dict) -> str:
             return "erro: o prompt não pode ficar vazio — o agente ficaria sem instrução nenhuma"
         anterior = (cliente.get("prompt_sugerido") or "").strip()
         db.definir_prompt(cid, novo)
-        # o prompt anterior vai pro log: é a única forma de desfazer, já que a
-        # troca sobrescreve e quem pediu está no WhatsApp, sem acesso ao painel
+        # db.definir_prompt já guarda o anterior em prompt_anterior — o log
+        # aqui é só pra auditoria (quem pediu, quando), não é mais a única
+        # forma de desfazer (ver restaurar_prompt_anterior).
         db.registrar_log(cid, "sistema",
                          f"[agente geral] prompt trocado por {demandante['id_whatsapp']}. "
                          f"Anterior ({len(anterior)} caracteres): {anterior[:600]}")
         return f"ok: prompt atualizado ({len(novo)} caracteres), vale da próxima mensagem"
+
+    if nome == "restaurar_prompt_anterior":
+        if not db.restaurar_prompt_anterior(cid):
+            return "erro: não há versão anterior pra restaurar"
+        db.registrar_log(cid, "sistema",
+                         f"[agente geral] prompt restaurado pra versão anterior, "
+                         f"a pedido de {demandante['id_whatsapp']}.")
+        return "ok: prompt voltou pra versão anterior, vale da próxima mensagem"
 
     if nome in ("ligar_agente", "desligar_agente"):
         ativo = nome == "ligar_agente"

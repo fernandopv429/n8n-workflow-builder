@@ -79,6 +79,18 @@ def _ferramentas_prompt() -> list:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "restaurar_prompt_anterior",
+                "description": (
+                    "Desfaz a ÚLTIMA troca de prompt deste cliente, voltando pro texto de "
+                    "antes. Chamar de novo desfaz o desfazer (alterna entre as duas últimas "
+                    "versões)."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
     ]
 
 
@@ -436,6 +448,12 @@ def _executar_ferramenta(nome: str, args: dict, cliente_id: int) -> str:
                 f"Prompt alterado pelo chat de gerenciamento ({len(novo)} caracteres). "
                 "Vale a partir da próxima mensagem recebida.")
             return f"ok: prompt atualizado ({len(novo)} caracteres), vale da próxima mensagem"
+        if nome == "restaurar_prompt_anterior":
+            if not db.restaurar_prompt_anterior(cliente_id):
+                return "erro: não há versão anterior pra restaurar"
+            db.registrar_log(cliente_id, "sistema",
+                             "Prompt restaurado pra versão anterior, pelo chat de gerenciamento.")
+            return "ok: prompt voltou pra versão anterior, vale da próxima mensagem"
 
         if nome.startswith("kommo_"):
             credenciais = db.obter_credenciais_kommo(cliente_id)

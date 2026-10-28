@@ -91,6 +91,11 @@ def garantir_schema():
         # alguém cadastrar — sem grupo configurado, o cliente simplesmente não
         # entra no envio (ver resumo_atendimento em servidor.py).
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS whatsapp_grupo_aviso TEXT")
+        # Backup de uma versão do prompt (pedido do Fernando, 28/10/2026): toda
+        # troca guarda o valor anterior aqui, pra dar pra desfazer uma edição
+        # ruim — seja feita no painel, pelo chat de gerenciamento, ou pelo
+        # próprio agente geral no WhatsApp (ver restaurar_prompt_anterior).
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_anterior TEXT")
         # Migração 15/10/2026 (pedido do Fernando): o desenho de clonar um
         # workflow por cliente no n8n foi substituído pelo worker central
         # (worker_agente.py), que lê prompt/Kommo/OpenAI direto do Postgres —
@@ -324,12 +329,42 @@ def definir_prompt(cliente_id: int, texto: str):
     partir do briefing — não havia como escrever nem corrigir uma vírgula sem
     gerar tudo de novo. Com o agente rodando no nosso worker, este texto É o
     system prompt dele (ver worker_agente.py), então precisa ser editável.
+
+    O valor que está saindo vai pra `prompt_anterior` antes de ser sobrescrito
+    (pedido do Fernando, 28/10/2026) — é o que permite desfazer uma troca ruim,
+    inclusive pelo próprio agente geral no WhatsApp (ver
+    restaurar_prompt_anterior). Só guarda UM nível (a troca anterior), não um
+    histórico inteiro — é o suficiente pro caso de "acabei de estragar isso".
     """
     with _conectar() as conn:
         conn.execute(
-            "UPDATE clientes SET prompt_sugerido = %s, atualizado_em = now() WHERE id = %s",
+            "UPDATE clientes SET prompt_anterior = prompt_sugerido, "
+            "prompt_sugerido = %s, atualizado_em = now() WHERE id = %s",
             (texto, cliente_id),
         )
+
+
+def restaurar_prompt_anterior(cliente_id: int) -> bool:
+    """Desfaz a última troca de prompt, trocando de volta com `prompt_anterior`.
+
+    É uma TROCA, não uma cópia — chamar de novo desfaz o desfazer (volta pro
+    que estava antes do restore), então restaurar duas vezes seguidas não
+    perde nada. Devolve False se não há o que restaurar (cliente novo, ou
+    prompt nunca foi trocado)."""
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT prompt_sugerido, prompt_anterior FROM clientes WHERE id = %s",
+            (cliente_id,),
+        ).fetchone()
+        if not linha or linha[1] is None:
+            return False
+        atual, anterior = linha
+        conn.execute(
+            "UPDATE clientes SET prompt_sugerido = %s, prompt_anterior = %s, "
+            "atualizado_em = now() WHERE id = %s",
+            (anterior, atual, cliente_id),
+        )
+    return True
 
 
 def listar_contatos(cliente_id: int, limite: int = 100) -> list:
