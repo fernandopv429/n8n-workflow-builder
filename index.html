@@ -986,8 +986,12 @@ async function carregarGeral() {
                   data-id="${c.id}">tirar</button></td>
     </tr>`).join('');
 
-  const opcoesGrupo = (grupos.grupos || []).map(g =>
-    `<option value="${escaparHtml(g.id)}">${escaparHtml(g.nome)}</option>`).join('');
+  // Só oferece grupo ainda livre — um grupo já é o resumo de OUTRO cliente,
+  // reaproveitar misturaria os números dos dois no mesmo grupo do WhatsApp.
+  const gruposEmUso = new Set((aviso.clientes || []).map(c => c.grupo));
+  const opcoesGrupo = (grupos.grupos || [])
+    .filter(g => !gruposEmUso.has(g.id))
+    .map(g => `<option value="${escaparHtml(g.id)}">${escaparHtml(g.nome)}</option>`).join('');
 
   caixa.innerHTML = `
     <div class="consumo-total">${conectado ? 'Conectado' : 'Desconectado'}
