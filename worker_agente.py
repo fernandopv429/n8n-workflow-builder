@@ -229,8 +229,11 @@ FERRAMENTA_HUMANO = {
 }
 
 # Tag fixa aplicada no Kommo quando o handoff tem lead_id conhecido — fica
-# visível direto na conta do cliente, sem precisar abrir o painel.
-TAG_TRANSFERIDO_ATENDENTE = "Transferido: atendente"
+# visível direto na conta do cliente, sem precisar abrir o painel. "LQIA" é
+# convenção já usada pelos clientes (ver automações deles no próprio Kommo),
+# não um nome nosso — convenção geral, vale pra qualquer cliente com Kommo
+# (31/10/2026, a pedido do Fernando).
+TAG_TRANSFERIDO_ATENDENTE = "LQIA"
 
 
 # Ferramentas do Cartão do Lead (Kommo), nativas — 30/10/2026: antes essas 7

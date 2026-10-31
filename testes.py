@@ -1003,7 +1003,7 @@ def _com_db_e_kommo_dublados():
     kommo_cartao.consultar_cartao_lead = lambda *a: (
         chamadas.append(("consultar", a)) or '{"tags_atuais": "vip"}')
     kommo_cartao.adicionar_tag = lambda *a: (
-        chamadas.append(("tag", a)) or '{"tags_agora": ["vip", "Transferido: atendente"]}')
+        chamadas.append(("tag", a)) or '{"tags_agora": ["vip", "LQIA"]}')
     return chamadas, originais
 
 
