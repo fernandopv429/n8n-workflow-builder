@@ -9,9 +9,8 @@ sem framework). Fluxo:
 
     GET  /saude                     liveness/readiness — ÚNICA rota sem auth
     GET  /                        index.html
-    GET  /config                   {"nichos": {...}, "origens": [...]}
     GET  /clientes                  lista clientes (dashboard)
-    POST /clientes                  cria cliente "rascunho" (passo 1: nome+nicho)
+    POST /clientes                  cria cliente "rascunho" (passo 1: só o nome)
     GET  /clientes/<id>              detalhe de um cliente
     GET  /clientes/<id>/logs          últimas entradas de log desse cliente
     PUT  /clientes/<id>/credenciais    grava Kommo + chave OpenAI e marca o
@@ -46,20 +45,15 @@ sys.path.insert(0, str(RAIZ))
 
 import agente_chat  # noqa: E402
 import agente_geral  # noqa: E402
-import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import monitor_fila  # noqa: E402
-import n8n_edicao  # noqa: E402
 import openai_admin  # noqa: E402
 import pocketbase_client  # noqa: E402
-import cloner  # noqa: E402
 import cofre  # noqa: E402
 import evolution_client  # noqa: E402
 from config import carregar_env  # noqa: E402
-from n8n_client import N8nClient  # noqa: E402
-from templates_nicho import NICHOS  # noqa: E402
 
 ENV = carregar_env()
 USUARIO_ESPERADO = ENV.get("PAINEL_USUARIO", "admin").strip()
@@ -78,7 +72,6 @@ ROTA_CLIENTE_LOGS = re.compile(r"^/clientes/(\d+)/logs$")
 ROTA_CLIENTE_CREDENCIAIS = re.compile(r"^/clientes/(\d+)/credenciais$")
 ROTA_CLIENTE_MENSAGENS = re.compile(r"^/clientes/(\d+)/mensagens$")
 ROTA_CLIENTE_CHAT = re.compile(r"^/clientes/(\d+)/chat$")
-ROTA_CLIENTE_APLICAR_PROMPT = re.compile(r"^/clientes/(\d+)/aplicar-prompt$")
 ROTA_CLIENTE_IMAGEM = re.compile(r"^/clientes/(\d+)/imagem$")
 # Atendimento (ARQUITETURA-AGENTE.md): conversas do agente com os pacientes,
 # separadas do chat do painel — que é o operador falando SOBRE o cliente.
@@ -221,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
         # quebrado mesmo estando de pé.
         if self.path == "/saude":
             try:
-                db.listar_templates_nicho()
+                db.listar_clientes()
             except Exception as e:  # noqa: BLE001
                 self._responder_json(503, {"status": "degradado", "banco": str(e)})
                 return
@@ -236,9 +229,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/" or self.path == "/index.html":
             self._servir_arquivo(RAIZ / "index.html", "text/html; charset=utf-8")
-            return
-        if self.path == "/config":
-            self._responder_json(200, {"nichos": NICHOS, "origens": db.listar_templates_nicho()})
             return
         if self.path == "/clientes":
             self._responder_json(200, {"clientes": [_com_imagem(c) for c in db.listar_clientes()]})
@@ -419,28 +409,10 @@ class Handler(BaseHTTPRequestHandler):
             if cliente is None:
                 self._responder_json(404, {"error": "cliente não encontrado"})
                 return
-            if cliente["batch_status"] == "in_progress":
-                cliente = self._checar_batch(cliente_id, cliente)
             self._responder_json(200, _com_imagem(cliente))
             return
 
         self._responder_json(404, {"error": "não encontrado"})
-
-    def _checar_batch(self, cliente_id: int, cliente: dict) -> dict:
-        """Poll-on-read: sem worker em segundo plano, então a checagem do lote
-        só acontece quando alguém pede o detalhe desse cliente."""
-        try:
-            resultado = briefing_batch.verificar_batch(cliente["batch_id"])
-        except Exception as e:  # noqa: BLE001 — não derruba a resposta por falha ao checar o lote
-            db.registrar_log(cliente_id, "erro", f"Falha ao checar Batch API: {e}")
-            return cliente
-
-        if resultado["status"] != cliente["batch_status"]:
-            db.atualizar_resultado_batch(
-                cliente_id, resultado["status"], resultado.get("prompt_agente"), resultado.get("estrutura_kommo")
-            )
-            cliente = db.obter_cliente(cliente_id)
-        return cliente
 
     # --- POST --------------------------------------------------------
 
@@ -712,11 +684,6 @@ class Handler(BaseHTTPRequestHandler):
             self._chat(int(m.group(1)))
             return
 
-        m = ROTA_CLIENTE_APLICAR_PROMPT.match(self.path)
-        if m:
-            self._aplicar_prompt_sugerido(int(m.group(1)))
-            return
-
         m = ROTA_CLIENTE_RESTAURAR_PROMPT.match(self.path)
         if m:
             cliente_id = int(m.group(1))
@@ -747,51 +714,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         cliente_nome = str(corpo.get("cliente_nome", "")).strip()
-        nicho = str(corpo.get("nicho", "")).strip()
-        workflow_origem_id = str(corpo.get("workflow_origem_id", "")).strip()
 
         if not cliente_nome:
             self._responder_json(400, {"error": "cliente_nome é obrigatório"})
-            return
-        if nicho not in NICHOS:
-            self._responder_json(400, {"error": f"nicho '{nicho}' desconhecido"})
-            return
-        template = db.obter_template_nicho(nicho)
-        if template is None or template["workflow_origem_id"] != workflow_origem_id:
-            self._responder_json(400, {"error": "workflow_origem_id não corresponde ao template cadastrado desse nicho"})
             return
 
         # O briefing saiu daqui (25/09/2026): gerado neste passo, ele não tinha
         # credencial do Kommo pra consultar e a proposta de funil saía às cegas.
         # Agora é feito pelo chat, depois das credenciais — com a opção de ir
         # pela Batch API lá mesmo.
-        cliente_id = db.criar_cliente_rascunho(cliente_nome, nicho, workflow_origem_id)
+        cliente_id = db.criar_cliente_rascunho(cliente_nome)
         self._responder_json(200, _com_imagem(db.obter_cliente(cliente_id)))
-
-    def _aplicar_prompt_sugerido(self, cliente_id: int):
-        """Aplica no agente o prompt vindo do briefing. Necessário quando o
-        lote da Batch API só termina DEPOIS da clonagem — nesse caso o agente
-        subiu com a persona do template e precisa ser corrigido."""
-        cliente = db.obter_cliente(cliente_id)
-        if cliente is None:
-            self._responder_json(404, {"error": "cliente não encontrado"})
-            return
-        if not cliente.get("prompt_sugerido"):
-            self._responder_json(400, {"error": "não há prompt gerado a partir de briefing pra este cliente"})
-            return
-        if not cliente.get("workflow_novo_id"):
-            self._responder_json(400, {"error": "o agente ainda não foi criado no n8n"})
-            return
-
-        try:
-            r = n8n_edicao.atualizar_prompt_agente(cliente["workflow_novo_id"], cliente["prompt_sugerido"])
-        except Exception as e:  # noqa: BLE001
-            db.registrar_log(cliente_id, "erro", f"Falha ao aplicar o prompt do briefing: {e}")
-            self._responder_json(502, {"error": str(e)})
-            return
-
-        db.registrar_log(cliente_id, "sistema", f"Prompt do briefing aplicado no agente '{r['node']}'.")
-        self._responder_json(200, {"aplicado": True, "node": r["node"]})
 
     def _enviar_imagem(self, cliente_id: int):
         """Recebe a imagem em base64 num JSON — evita ter que fazer o parse de
@@ -926,14 +859,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         relatorio = []
-        if cliente["workflow_novo_id"]:
-            try:
-                relatorio = cloner.remover_agente(
-                    N8nClient(), cliente["workflow_novo_id"], db.obter_credencial_openai(cliente_id)
-                )
-            except Exception as e:  # noqa: BLE001 — n8n fora do ar não deve travar a remoção no painel
-                relatorio = [f"falha ao limpar no n8n: {e}"]
-                sys.stderr.write(f"[servidor] {relatorio[0]}\n")
 
         if cliente.get("imagem_pb_record_id"):
             try:

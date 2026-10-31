@@ -171,10 +171,10 @@ O `Dockerfile` já traz um `HEALTHCHECK` equivalente para `docker run` avulso.
 
 ## 5. Primeira subida
 
-O schema do banco é criado sozinho na subida (`db.garantir_schema()`), junto
-com o template padrão do nicho `clinica`. Se o banco estiver fora do ar, o
-container **não** morre em loop: sobe, loga o aviso e `/saude` responde 503 —
-é mais fácil de diagnosticar que um crash-loop.
+O schema do banco é criado sozinho na subida (`db.garantir_schema()`). Se o
+banco estiver fora do ar, o container **não** morre em loop: sobe, loga o
+aviso e `/saude` responde 503 — é mais fácil de diagnosticar que um
+crash-loop.
 
 ## Verificação pós-deploy
 

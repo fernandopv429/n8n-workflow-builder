@@ -14,7 +14,7 @@ clone (ver commit "remove clonagem de workflow no n8n do fluxo de
 credenciais"): não existe mais workflow nenhum pra editar.
 
 Rastreado pelo AgentOps (é a parte genuinamente não-determinística do
-sistema — diferente do prompt_gerador.py, que é uma chamada isolada).
+sistema).
 """
 import json
 import pathlib
@@ -145,7 +145,7 @@ def _bloco_sugestao(cliente: dict) -> str:
 def _system_prompt(cliente: dict) -> str:
     return (
         f"Você ajuda a gerenciar o agente de IA e o CRM (Kommo) do cliente "
-        f"'{cliente['cliente_nome']}' (nicho: {cliente['nicho']}) da A5 Ecossistema."
+        f"'{cliente['cliente_nome']}' da A5 Ecossistema."
         + _bloco_sugestao(cliente)
         + "\nFerramentas disponíveis:\n"
         "- ler/reescrever o prompt (system message) do agente principal — vale a "

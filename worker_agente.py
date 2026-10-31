@@ -42,7 +42,6 @@ import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import evolution_client
 import pocketbase_client  # noqa: E402
-import n8n_edicao  # noqa: E402
 
 FILA_ENTRADA = "agente.entrada"
 FILA_SAIDA = "agente.saida"
@@ -394,8 +393,8 @@ def _system_prompt(cliente: dict) -> str:
     base = (cliente.get("prompt_sugerido") or "").strip()
     if not base:
         base = (
-            f"Você atende no WhatsApp pelo cliente '{cliente['cliente_nome']}' "
-            f"({cliente['nicho']}). Seja breve, cordial e objetivo."
+            f"Você atende no WhatsApp pelo cliente '{cliente['cliente_nome']}'. "
+            "Seja breve, cordial e objetivo."
         )
     # Só as regras de Kommo que este agente realmente usa: ele move lead e
     # preenche campo, não monta funil. O resto das armadilhas (cores, dicas de
@@ -448,11 +447,10 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     # disso: a ferramenta falha sozinha e o resto da conversa segue.
     credenciais = {}
     if any(m.get("credenciais_pedidas") for m in mapa_mcp.values()):
-        try:
-            credenciais = n8n_edicao.credenciais_kommo(cliente)
-        except Exception as e:  # noqa: BLE001 — credencial ausente ou n8n fora
+        credenciais = db.obter_credenciais_kommo(cliente["id"])
+        if not credenciais:
             db.registrar_log(cliente["id"], "erro",
-                             f"[worker] sem credencial do Kommo: {e}")
+                             "[worker] sem credencial do Kommo cadastrada (configure na engrenagem)")
     openai = _cliente_openai(cliente)
 
     for _ in range(MAX_RODADAS):

@@ -1,6 +1,8 @@
 """Cliente fino para a API pública do n8n (só biblioteca padrão — sem `requests`).
 
-Cobre só o que o cloner.py precisa: ler/criar/atualizar/ativar/desativar workflow.
+Usado por trilho_n8n.py (criar/atualizar o trilho genérico) e mcp_cliente.py
+(gerenciar os MCPs por cliente hospedados no n8n). Ler/criar/atualizar/
+ativar/desativar workflow e credencial.
 Autenticação: header X-N8N-API-KEY, lido de .env nesta mesma pasta.
 """
 import json

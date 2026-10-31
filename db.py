@@ -1,10 +1,8 @@
 """Estado dos clientes no Postgres (host 85.31.63.37): cada cliente nasce
-"rascunho" no passo 1 (nome + nicho), vira "clonado" quando a engrenagem
-dispara a clonagem real. `chat_mensagens`/`logs` dão suporte à tela de
-gerenciamento (Fase 2 do plano — chat + caixinha de logs).
-
-Substitui a tabela `clonagens` da Fase 1 (ficou vazia — nenhuma clonagem real
-rodou ainda nela, só dry-run — não precisou de migração de dados).
+"rascunho" no passo 1 (só o nome), vira "ativo" quando a engrenagem salva
+Kommo + OpenAI (ver ARQUITETURA-AGENTE.md — não existe mais clonagem de
+workflow no n8n). `chat_mensagens`/`logs` dão suporte à tela de
+gerenciamento.
 """
 import json
 import pathlib
@@ -30,24 +28,27 @@ def garantir_schema():
             CREATE TABLE IF NOT EXISTS clientes (
                 id SERIAL PRIMARY KEY,
                 cliente_nome TEXT NOT NULL,
-                nicho TEXT NOT NULL,
-                workflow_origem_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'rascunho'
                     CHECK (status IN ('rascunho', 'ativo', 'erro')),
-                workflow_novo_id TEXT,
-                workflow_novo_url TEXT,
-                manifesto JSONB,
-                avisos JSONB,
                 criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
                 atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
-        # Briefing livre (18/09/2026) — gerado via Batch API (briefing_batch.py),
-        # não em tempo real, por isso cabe num campo separado consultado sob
-        # demanda (poll) em vez de um fluxo síncrono.
-        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS briefing_texto TEXT")
-        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS batch_id TEXT")
-        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS batch_status TEXT")
+        # Migração 30/10/2026 (pedido do Fernando): nicho/workflow_origem_id só
+        # existiam pra escolher o workflow-molde a clonar — sem clone (ver
+        # migração clonado->ativo acima), nada no sistema lê mais esses campos.
+        # briefing_texto/batch_id/batch_status eram do fluxo antigo de briefing
+        # no passo 1 (saiu em 25/09/2026 pro chat de gerenciamento, que usa a
+        # tabela `chat_lotes`, não estas colunas). manifesto/avisos nunca
+        # chegaram a ser lidos por nenhum código.
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS nicho")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS workflow_origem_id")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS briefing_texto")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS batch_id")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS batch_status")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS manifesto")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS avisos")
+        conn.execute("DROP TABLE IF EXISTS templates_nicho")
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_sugerido TEXT")
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS estrutura_kommo_sugerida JSONB")
         # Imagem do card: o arquivo vive no PocketBase compartilhado, aqui fica
@@ -117,6 +118,11 @@ def garantir_schema():
             "ALTER TABLE clientes ADD CONSTRAINT clientes_status_check "
             "CHECK (status IN ('rascunho', 'ativo', 'erro'))"
         )
+        # Só depois da migração acima (que ainda escreve nelas pra zerar
+        # clientes vindos do 'clonado') é que workflow_novo_id/url somem de
+        # vez — 30/10/2026, junto com o resto do clonador (cloner.py etc.).
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS workflow_novo_id")
+        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS workflow_novo_url")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
@@ -147,17 +153,6 @@ def garantir_schema():
                 status TEXT NOT NULL DEFAULT 'in_progress',
                 pergunta TEXT NOT NULL,
                 criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-        """)
-        conn.execute("""
-            -- um template padrão por nicho (workflow do n8n usado como base pra
-            -- clonar) — vive no banco pra não precisar editar código toda vez
-            -- que um nicho novo ganha um cliente-modelo.
-            CREATE TABLE IF NOT EXISTS templates_nicho (
-                nicho TEXT PRIMARY KEY,
-                workflow_origem_id TEXT NOT NULL,
-                label TEXT NOT NULL,
-                atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
 
@@ -295,7 +290,6 @@ def garantir_schema():
                 processada_em TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
-    _seed_templates_nicho()
 
 
 # --- estado do agente de atendimento ------------------------------------
@@ -528,75 +522,15 @@ def registrar_mensagem_processada(mensagem_id: str, cliente_id: int) -> bool:
     return linha is not None
 
 
-# --- templates por nicho -----------------------------------------------
-
-def definir_template_nicho(nicho: str, workflow_origem_id: str, label: str):
-    """Cadastra/substitui o template padrão de um nicho. Só existe UM por nicho —
-    quem quiser trocar o padrão chama de novo com o mesmo nicho."""
-    with _conectar() as conn:
-        conn.execute(
-            """
-            INSERT INTO templates_nicho (nicho, workflow_origem_id, label, atualizado_em)
-            VALUES (%s, %s, %s, now())
-            ON CONFLICT (nicho) DO UPDATE
-                SET workflow_origem_id = EXCLUDED.workflow_origem_id,
-                    label = EXCLUDED.label,
-                    atualizado_em = now()
-            """,
-            (nicho, workflow_origem_id, label),
-        )
-
-
-def obter_template_nicho(nicho: str) -> dict | None:
-    with _conectar() as conn:
-        r = conn.execute(
-            "SELECT nicho, workflow_origem_id, label FROM templates_nicho WHERE nicho = %s",
-            (nicho,),
-        ).fetchone()
-    return {"nicho": r[0], "workflow_origem_id": r[1], "label": r[2]} if r else None
-
-
-def listar_templates_nicho() -> list:
-    with _conectar() as conn:
-        linhas = conn.execute(
-            "SELECT nicho, workflow_origem_id, label FROM templates_nicho ORDER BY nicho"
-        ).fetchall()
-    return [{"nicho": r[0], "id": r[1], "label": r[2]} for r in linhas]
-
-
-def _seed_templates_nicho():
-    """Só insere se a tabela estiver vazia pro nicho — nunca sobrescreve o que
-    já foi cadastrado/editado depois."""
-    with _conectar() as conn:
-        conn.execute(
-            """
-            INSERT INTO templates_nicho (nicho, workflow_origem_id, label)
-            VALUES ('clinica', 'Jv3y1QjnT84AHywf',
-                    'Fabifisio (clínica) — todas as sub-workflows corretas, sem httpRequestTool de tag')
-            ON CONFLICT (nicho) DO NOTHING
-            """
-        )
-
-
 # --- clientes ---------------------------------------------------------
 
-def criar_cliente_rascunho(
-    cliente_nome: str, nicho: str, workflow_origem_id: str,
-    briefing_texto: str = "", batch_id: str = "",
-) -> int:
+def criar_cliente_rascunho(cliente_nome: str) -> int:
     with _conectar() as conn:
         linha = conn.execute(
-            """
-            INSERT INTO clientes (cliente_nome, nicho, workflow_origem_id, briefing_texto, batch_id, batch_status)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (cliente_nome, nicho, workflow_origem_id, briefing_texto or None, batch_id or None,
-             "in_progress" if batch_id else None),
+            "INSERT INTO clientes (cliente_nome) VALUES (%s) RETURNING id",
+            (cliente_nome,),
         ).fetchone()
-    registrar_log(linha[0], "sistema", f"Cliente '{cliente_nome}' criado (rascunho, nicho {nicho}).")
-    if batch_id:
-        registrar_log(linha[0], "sistema", f"Briefing enviado pra Batch API (lote {batch_id}) — prompt e sugestão de Kommo saem em segundo plano.")
+    registrar_log(linha[0], "sistema", f"Cliente '{cliente_nome}' criado (rascunho).")
     return linha[0]
 
 
@@ -632,20 +566,6 @@ def obter_cliente(cliente_id: int) -> dict | None:
         cur = conn.execute("SELECT * FROM clientes WHERE id = %s", (cliente_id,))
         r = cur.fetchone()
         return _linha_para_cliente(cur, r) if r else None
-
-
-def atualizar_resultado_batch(cliente_id: int, status: str, prompt_sugerido: str = None, estrutura_kommo_sugerida: dict = None):
-    with _conectar() as conn:
-        conn.execute(
-            """
-            UPDATE clientes
-            SET batch_status = %s, prompt_sugerido = %s, estrutura_kommo_sugerida = %s, atualizado_em = now()
-            WHERE id = %s
-            """,
-            (status, prompt_sugerido, json.dumps(estrutura_kommo_sugerida) if estrutura_kommo_sugerida else None, cliente_id),
-        )
-    if status == "completed":
-        registrar_log(cliente_id, "sistema", "Batch API concluído — prompt e sugestão de Kommo disponíveis pra revisão.")
 
 
 def listar_clientes() -> list:
@@ -719,16 +639,6 @@ def listar_mensagens(cliente_id: int) -> list:
             (cliente_id,),
         ).fetchall()
     return [{"role": r[0], "conteudo": r[1], "criado_em": r[2].isoformat()} for r in linhas]
-
-
-def obter_credencial_openai(cliente_id: int) -> str:
-    """Id da credencial OpenAI criada pra este cliente, guardado no manifesto
-    na hora da clonagem. Necessário pra conseguir removê-la junto com o agente."""
-    with _conectar() as conn:
-        r = conn.execute("SELECT manifesto FROM clientes WHERE id = %s", (cliente_id,)).fetchone()
-    if not r or not r[0]:
-        return ""
-    return (r[0] or {}).get("openai_credential_id", "") or ""
 
 
 def definir_projeto_openai(cliente_id: int, projeto_id: str, api_key_cifrada: str = ""):
@@ -986,11 +896,8 @@ def definir_credenciais_kommo(cliente_id: int, subdominio: str, token: str):
 
 
 def obter_credenciais_kommo(cliente_id: int) -> dict:
-    """{kommo_domain, access_token} do nosso banco, ou {} se não tiver.
-
-    Quem chama cai pro node Database do clone quando vier vazio — é o que
-    mantém os clientes antigos funcionando durante a migração.
-    """
+    """{kommo_domain, access_token} do nosso banco, ou {} se não tiver
+    (cadastrada na engrenagem do painel)."""
     import cofre
     with _conectar() as conn:
         linha = conn.execute(
@@ -1019,9 +926,9 @@ def obter_chave_openai_cliente(cliente_id: int) -> str:
 
 
 def remover_cliente(cliente_id: int):
-    """Apaga o cliente e tudo que pende dele no banco. Não toca no n8n nem na
-    OpenAI — quem decide isso é quem chama (ver cloner.remover_agente e
-    openai_admin.arquivar_projeto)."""
+    """Apaga o cliente e tudo que pende dele no banco. Não toca na Evolution
+    nem na OpenAI — quem decide isso é quem chama (ver evolution_client.
+    remover_instancia e openai_admin.arquivar_projeto)."""
     with _conectar() as conn:
         conn.execute("DELETE FROM chat_lotes WHERE cliente_id = %s", (cliente_id,))
         conn.execute("DELETE FROM chat_mensagens WHERE cliente_id = %s", (cliente_id,))
