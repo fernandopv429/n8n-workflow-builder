@@ -29,6 +29,7 @@ import asyncio
 import json
 import pathlib
 import sys
+import time
 
 RAIZ = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(RAIZ / ".pylibs"))
@@ -43,6 +44,17 @@ from mcp.client.streamable_http import (  # noqa: E402
 )
 
 SEPARADOR = "__"
+
+# Cache em memória (30/10/2026): `worker_agente.py` chama `listar_ferramentas`
+# a cada mensagem do paciente, pra cada MCP ligado — sem isso, toda mensagem
+# pagava um `list_tools()` novo, e todo MCP antigo (SSE) pagava ainda uma
+# tentativa de Streamable HTTP fadada a falhar antes de cair pro SSE. TTL
+# curto o bastante pra um MCP editado no n8n aparecer rápido, longo o
+# suficiente pra não pesar numa conversa ativa.
+TTL_FERRAMENTAS_SEGUNDOS = 300
+
+_cache_ferramentas: dict = {}   # (path, token) -> (expira_em, ferramentas_sem_apelido)
+_cache_transporte: dict = {}    # path -> "http" | "sse", o que funcionou da última vez
 
 # Credenciais que o CHAMADOR injeta em MCP multi-inquilino. Serve pra duas
 # coisas: saber o que mandar na chamada, e reconhecer que o MCP não guarda
@@ -84,18 +96,10 @@ def _cabecalhos(token: str = "") -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-async def _com_sessao(path: str, token: str, acao):
-    """Abre a sessão no transporte certo e executa `acao(session)`.
-
-    Tenta Streamable HTTP (node v2) e cai pro SSE (v1.1) quando o moderno não
-    responde. O erro guardado é o do SSE: é o que importa quando os dois falham,
-    porque o 404 do primeiro só diz "este MCP não é v2".
-    """
-    cab = _cabecalhos(token)
+async def _tentar_http(path: str, cab: dict, acao):
     # O resultado é guardado FORA do `async with`: estes transportes costumam
     # levantar no fechamento do contexto, depois de a ação já ter dado certo.
-    # Um `except` em volta do bloco inteiro jogava o resultado bom fora e caía
-    # pro SSE, que então dava 404 — e o MCP v2 parecia estar fora do ar.
+    # Um `except` em volta do bloco inteiro jogaria o resultado bom fora.
     obtido = []
     try:
         # Nesta versão do SDK o `streamable_http_client` NÃO aceita `headers` —
@@ -110,11 +114,50 @@ async def _com_sessao(path: str, token: str, acao):
     except Exception:
         if obtido:
             return obtido[0]
+        raise
+    return obtido[0]
+
+
+async def _tentar_sse(path: str, cab: dict, acao):
+    obtido = []
+    try:
         async with sse_client(url_do_path(path, sse=True), headers=cab) as (read, write):
             async with ClientSession(read, write) as s:
                 await s.initialize()
-                return await acao(s)
+                obtido.append(await acao(s))
+    except Exception:
+        if obtido:
+            return obtido[0]
+        raise
     return obtido[0]
+
+
+_TRANSPORTES = {"http": _tentar_http, "sse": _tentar_sse}
+
+
+async def _com_sessao(path: str, token: str, acao):
+    """Abre a sessão no transporte certo e executa `acao(session)`.
+
+    Tenta primeiro o que já funcionou da última vez pra este `path`
+    (`_cache_transporte`) — sem isso, TODA chamada a um MCP antigo (SSE)
+    pagava uma tentativa de Streamable HTTP fadada a falhar antes de cair pro
+    certo. Se o transporte memorizado falhar (alguém trocou a versão do node
+    no n8n), cai pro outro — autocurativo, não fica preso numa memória velha.
+    """
+    cab = _cabecalhos(token)
+    preferido = _cache_transporte.get(path, "http")
+    ordem = [preferido] + [t for t in ("http", "sse") if t != preferido]
+
+    erro = None
+    for nome in ordem:
+        try:
+            resultado = await _TRANSPORTES[nome](path, cab, acao)
+        except Exception as e:  # noqa: BLE001 — tenta o outro transporte
+            erro = e
+            continue
+        _cache_transporte[path] = nome
+        return resultado
+    raise erro
 
 
 async def _listar_async(path: str, token: str) -> list:
@@ -136,13 +179,26 @@ async def _chamar_async(path: str, token: str, nome: str, args: dict) -> str:
 def listar_ferramentas(path: str, token: str = "", apelido: str = "") -> list:
     """Ferramentas de um MCP, com o nome prefixado pelo apelido.
 
+    Cacheada por `TTL_FERRAMENTAS_SEGUNDOS`: o schema de um MCP não muda de
+    uma mensagem do paciente pra outra, e sem cache `worker_agente.py` pagava
+    um `list_tools()` (sessão completa) a cada mensagem, pra cada MCP ligado.
+
     Erro vira McpIndisponivel com o motivo legível: um MCP fora do ar não pode
-    derrubar o carregamento dos outros nem o atendimento inteiro.
+    derrubar o carregamento dos outros nem o atendimento inteiro. Erro NÃO
+    fica em cache — um MCP que caiu não pode ficar marcado "fora do ar" por 5
+    minutos depois de já ter voltado.
     """
-    try:
-        ferramentas = asyncio.run(_listar_async(path, token))
-    except Exception as e:  # noqa: BLE001 — rede, 403, path errado
-        raise McpIndisponivel(f"MCP '{path}': {type(e).__name__}: {str(e)[:160]}") from None
+    chave = (path, token)
+    em_cache = _cache_ferramentas.get(chave)
+    if em_cache and em_cache[0] > time.monotonic():
+        ferramentas = [dict(f) for f in em_cache[1]]
+    else:
+        try:
+            ferramentas = asyncio.run(_listar_async(path, token))
+        except Exception as e:  # noqa: BLE001 — rede, 403, path errado
+            raise McpIndisponivel(f"MCP '{path}': {type(e).__name__}: {str(e)[:160]}") from None
+        _cache_ferramentas[chave] = (time.monotonic() + TTL_FERRAMENTAS_SEGUNDOS, ferramentas)
+        ferramentas = [dict(f) for f in ferramentas]
     if apelido:
         for f in ferramentas:
             f["name"] = f"{apelido}{SEPARADOR}{f['name']}"

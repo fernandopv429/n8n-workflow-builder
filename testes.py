@@ -55,6 +55,91 @@ def teste_catalogo_esconde_o_kommo_completo_sempre_ativo():
     assert achados == {"agenda"}, achados
 
 
+# --- cache de MCP (mcp_cliente.py, 30/10/2026) ------------------------------
+# worker_agente.py chama listar_ferramentas a cada mensagem do paciente, pra
+# cada MCP ligado — sem cache isso é uma sessão MCP inteira por mensagem, e
+# pior ainda pra MCP antigo (SSE), que pagava uma tentativa de Streamable
+# HTTP fadada a falhar toda vez antes de cair pro certo.
+
+def teste_listar_ferramentas_usa_cache_e_nao_vaza_apelido_entre_chamadas():
+    """Duas chamadas seguidas (mesmo path) não podem abrir duas sessões MCP —
+    e dois apelidos diferentes pro MESMO path não podem ver o prefixo um do
+    outro (bug possível se o cache devolvesse a mesma lista por referência,
+    em vez de uma cópia pra cada chamador prefixar à vontade)."""
+    import mcp_cliente as m
+
+    chamadas = []
+    async def _listar_falso(path, token):
+        chamadas.append(1)
+        return [{"name": "buscar_horarios", "description": "x", "input_schema": {}}]
+
+    original = m._listar_async
+    m._listar_async = _listar_falso
+    m._cache_ferramentas.clear()
+    try:
+        a = m.listar_ferramentas("agenda", apelido="clinica")
+        b = m.listar_ferramentas("agenda", apelido="dentista")
+    finally:
+        m._listar_async = original
+        m._cache_ferramentas.clear()
+    assert len(chamadas) == 1, "segunda chamada não devia ter reaberto sessão MCP"
+    assert a[0]["name"] == "clinica__buscar_horarios"
+    assert b[0]["name"] == "dentista__buscar_horarios"
+
+
+def teste_cache_de_ferramentas_expira_pelo_ttl():
+    import mcp_cliente as m
+
+    chamadas = []
+    async def _listar_falso(path, token):
+        chamadas.append(1)
+        return [{"name": "x", "description": "", "input_schema": {}}]
+
+    original = m._listar_async
+    m._listar_async = _listar_falso
+    m._cache_ferramentas.clear()
+    try:
+        m.listar_ferramentas("p")
+        # força a entrada a já ter expirado, sem precisar esperar o TTL de verdade
+        _, ferramentas = m._cache_ferramentas[("p", "")]
+        m._cache_ferramentas[("p", "")] = (0, ferramentas)
+        m.listar_ferramentas("p")
+    finally:
+        m._listar_async = original
+        m._cache_ferramentas.clear()
+    assert len(chamadas) == 2, "entrada expirada devia ter buscado de novo"
+
+
+def teste_cache_de_transporte_e_autocurativo():
+    """Lembrar o transporte que funcionou da última vez acelera a próxima
+    chamada — mas se ele parar de funcionar (node trocou de versão no n8n),
+    cai pro outro em vez de ficar preso numa memória desatualizada."""
+    import asyncio
+    import mcp_cliente as m
+
+    tentativas = []
+    async def falso_sse(path, cab, acao):
+        tentativas.append("sse")
+        raise RuntimeError("sse não responde mais")
+    async def falso_http(path, cab, acao):
+        tentativas.append("http")
+        return "ok"
+
+    m._cache_transporte["algumpath"] = "sse"   # memória desatualizada
+    originais = dict(m._TRANSPORTES)
+    m._TRANSPORTES["sse"] = falso_sse
+    m._TRANSPORTES["http"] = falso_http
+    try:
+        r = asyncio.run(m._com_sessao("algumpath", "", lambda s: None))
+        assert tentativas == ["sse", "http"], tentativas
+        assert r == "ok"
+        assert m._cache_transporte["algumpath"] == "http", "devia ter atualizado a memória"
+    finally:
+        m._TRANSPORTES.clear()
+        m._TRANSPORTES.update(originais)
+        m._cache_transporte.pop("algumpath", None)
+
+
 # --- trava do kommo_atualizar_etapa (agente_chat._guarda_etapa_kommo) ---------
 # Em 29/09/2026 o chat renomeou a etapa "Contato inicial" para "MIA" porque
 # chutou o status_id, e em outra tentativa mandou PATCH pra etapa 142 e pra de
@@ -862,6 +947,9 @@ TESTES = [
     teste_tipo_que_nao_lemos_tem_resposta_pronta,
     teste_converte_param_json_do_kommo_pra_string,
     teste_catalogo_esconde_o_kommo_completo_sempre_ativo,
+    teste_listar_ferramentas_usa_cache_e_nao_vaza_apelido_entre_chamadas,
+    teste_cache_de_ferramentas_expira_pelo_ttl,
+    teste_cache_de_transporte_e_autocurativo,
     teste_trava_barra_patch_na_etapa_errada,
     teste_trava_deixa_renomear_quando_confirmado,
     teste_trava_barra_etapas_que_o_kommo_nao_edita,
