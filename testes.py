@@ -671,6 +671,77 @@ def teste_erro_do_kommo_chega_legivel_no_modelo():
     assert "status_id" in r, "o detalhe do Kommo se perdeu"
 
 
+# --- Kommo nativo no worker (30/10/2026) --------------------------------
+# As 7 ferramentas do Cartão do Lead saíram do caminho MCP (sessão + handshake
+# a cada mensagem) e viraram chamada direta: `kommo_cartao.py` tem só a
+# lógica (zero dependência de MCP), `mcp_kommo_cartao.py` é casca fina em
+# cima pra quem ainda precisa do protocolo (Claude Desktop, rede), e
+# `worker_agente.py` importa `kommo_cartao` e chama as funções direto.
+
+def teste_kommo_cartao_nao_depende_de_mcp():
+    """`kommo_cartao.py` tem que importar em qualquer ambiente, mesmo sem o
+    pacote `mcp` instalado (como este sandbox, de propósito) — é a prova de
+    que a extração realmente não carregou nada do SDK de MCP. Se alguém
+    importar `mcp`/`uvicorn`/`starlette` aqui por engano, este teste some da
+    lista de "OK" e vira um ImportError explícito."""
+    import kommo_cartao as k
+    assert callable(k.consultar_cartao_lead)
+    assert callable(k.mover_lead)
+
+
+def teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao():
+    """O schema que o worker mostra pro modelo (FERRAMENTAS_KOMMO_CARTAO) tem
+    que pedir exatamente os parâmetros que `kommo_cartao.py` espera — menos
+    kommo_domain/access_token, que a ferramenta nativa nunca expõe ao modelo
+    (ver worker_agente.py: `_executar` injeta do cadastro, não do schema)."""
+    import inspect
+    import kommo_cartao as k
+    import worker_agente as w
+
+    assert w.NOMES_KOMMO_CARTAO == {
+        "consultar_cartao_lead", "mover_lead", "atualizar_campo_personalizado",
+        "adicionar_tag", "remover_tag", "adicionar_nota", "criar_tarefa",
+    }
+    for f in w.FERRAMENTAS_KOMMO_CARTAO:
+        nome = f["function"]["name"]
+        do_schema = set(f["function"]["parameters"]["properties"])
+        da_funcao = set(inspect.signature(getattr(k, nome)).parameters) - {"kommo_domain", "access_token"}
+        assert do_schema == da_funcao, f"{nome}: schema={do_schema} função={da_funcao}"
+
+
+def teste_executar_kommo_cartao_ignora_credencial_do_modelo():
+    """Mesma trava que já existia pro MCP genérico: kommo_domain/access_token
+    que o modelo tentar mandar são descartados, só o que vem de `credenciais`
+    (o cadastro do cliente) chega na chamada de verdade."""
+    import kommo_cartao as k
+    import worker_agente as w
+
+    vistos = {}
+    original = k._chamar
+    def falso(dominio, token, metodo, caminho, corpo=None):
+        vistos.update(dominio=dominio, token=token)
+        return {"id": 1}
+    k._chamar = falso
+    try:
+        r = w._executar(
+            "consultar_cartao_lead",
+            {"lead_id": "42", "kommo_domain": "invasor.kommo.com", "access_token": "roubado"},
+            {"kommo_domain": "clientereal", "access_token": "token-de-verdade"},
+            cliente_id=1,
+        )
+    finally:
+        k._chamar = original
+    assert vistos["dominio"] == "clientereal", vistos
+    assert vistos["token"] == "token-de-verdade", vistos
+    assert '"id": 1' in r
+
+
+def teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo():
+    import worker_agente as w
+    r = w._executar("mover_lead", {"lead_id": "1", "status_id": "2"}, {}, cliente_id=1)
+    assert r.startswith("erro:") and "Kommo" in r, r
+
+
 # --- QA de atendimento (qa_atendimento.py) ------------------------------
 # O prompt do juiz tem um exemplo de JSON literal no meio do template —
 # achado ao escrever o módulo (30/10/2026): `str.format()` tenta resolver
@@ -779,6 +850,10 @@ TESTES = [
     teste_nao_deixa_projeto_orfao_se_a_chave_nao_vier,
     teste_erro_da_openai_carrega_o_corpo,
     teste_reset_so_dispara_em_comando_exato,
+    teste_kommo_cartao_nao_depende_de_mcp,
+    teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao,
+    teste_executar_kommo_cartao_ignora_credencial_do_modelo,
+    teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo,
     teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
     teste_qa_aceita_veredito_valido,
     teste_qa_rejeita_severidade_fora_do_enum,

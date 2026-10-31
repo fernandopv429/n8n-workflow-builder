@@ -38,6 +38,7 @@ import agente_chat  # noqa: E402
 import agente_geral  # noqa: E402  (reaproveita as travas já testadas)
 import config  # noqa: E402
 import db  # noqa: E402
+import kommo_cartao  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import evolution_client
@@ -217,6 +218,100 @@ FERRAMENTA_HUMANO = {
 }
 
 
+# Ferramentas do Cartão do Lead (Kommo), nativas — 30/10/2026: antes essas 7
+# ferramentas vinham de um MCP ligado por cliente (ver mcp_cliente.py), e TODA
+# mensagem do paciente pagava uma sessão MCP inteira (handshake + negociação
+# de transporte) só pra no fim fazer a mesma chamada HTTP que `kommo_cartao.py`
+# faz direto. Rodando no mesmo processo, chamamos a função — zero sessão.
+#
+# kommo_domain/access_token NÃO aparecem aqui: ao contrário do MCP (onde
+# `$fromAI` expunha os dois no schema pro modelo "preencher"), a ferramenta
+# nativa nunca deixa o modelo nem ver esse parâmetro — `_executar` injeta
+# direto do cadastro do cliente. Não tem o que filtrar porque não tem o que
+# o modelo possa propor.
+def _ferramenta_kommo(nome: str, descricao: str, propriedades: dict, obrigatorios: list) -> dict:
+    return {"type": "function", "function": {
+        "name": nome, "description": descricao,
+        "parameters": {"type": "object", "properties": propriedades, "required": obrigatorios},
+    }}
+
+
+FERRAMENTAS_KOMMO_CARTAO = [
+    _ferramenta_kommo(
+        "consultar_cartao_lead",
+        "Consulta o cartão completo de um lead no Kommo: campos personalizados, "
+        "tags, etapa do funil (status_id), funil (pipeline_id) e contato "
+        "principal. Use SEMPRE antes de adicionar_tag ou remover_tag, pra saber "
+        "exatamente quais tags o lead já tem.",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."}},
+        ["lead_id"],
+    ),
+    _ferramenta_kommo(
+        "mover_lead",
+        "Move um lead para outra etapa do funil. Informe status_id (obrigatório) "
+        "e pipeline_id apenas se estiver mudando o lead para outro funil (deixe "
+        "vazio pra mover só a etapa dentro do funil atual).",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."},
+         "status_id": {"type": "string", "description": "ID da etapa de destino."},
+         "pipeline_id": {"type": "string", "description": "ID do funil de destino, só se mudar de funil."}},
+        ["lead_id", "status_id"],
+    ),
+    _ferramenta_kommo(
+        "atualizar_campo_personalizado",
+        "Atualiza UM campo personalizado do cartão do lead. Não mexe em tags "
+        "nem na etapa do funil. Pra atualizar vários campos, chame uma vez "
+        "para cada.",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."},
+         "field_id": {"type": "string", "description": "ID do campo personalizado."},
+         "valor": {"type": "string", "description": "Novo valor do campo."}},
+        ["lead_id", "field_id", "valor"],
+    ),
+    _ferramenta_kommo(
+        "adicionar_tag",
+        "Adiciona uma tag ao lead, preservando as que já existem. IMPORTANTE: "
+        "o Kommo substitui a lista inteira de tags a cada chamada — chame "
+        "consultar_cartao_lead ANTES e informe todas as atuais em tags_atuais, "
+        "separadas por vírgula.",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."},
+         "tag_novo": {"type": "string", "description": "Tag a adicionar."},
+         "tags_atuais": {"type": "string", "description": "Tags atuais do lead, separadas por vírgula (vem de consultar_cartao_lead)."}},
+        ["lead_id", "tag_novo"],
+    ),
+    _ferramenta_kommo(
+        "remover_tag",
+        "Remove uma tag do lead, preservando as demais. IMPORTANTE: o Kommo "
+        "substitui a lista inteira de tags a cada chamada — chame "
+        "consultar_cartao_lead ANTES e informe todas as atuais em tags_atuais.",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."},
+         "tag_remover": {"type": "string", "description": "Tag a remover."},
+         "tags_atuais": {"type": "string", "description": "Tags atuais do lead, separadas por vírgula (vem de consultar_cartao_lead)."}},
+        ["lead_id", "tag_remover"],
+    ),
+    _ferramenta_kommo(
+        "adicionar_nota",
+        "Adiciona uma nota/comentário interno no cartão do lead — visível pra "
+        "quem abrir o lead no Kommo, mas NUNCA enviada pro lead. Use pra "
+        "registrar resumo de qualificação ou observação importante da conversa.",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."},
+         "texto": {"type": "string", "description": "Texto da nota."}},
+        ["lead_id", "texto"],
+    ),
+    _ferramenta_kommo(
+        "criar_tarefa",
+        "Cria uma tarefa no Kommo vinculada ao lead, com prazo — é como avisar "
+        "de verdade a pessoa pra assumir, em vez de só deixar o resumo escrito "
+        "na conversa. Use ao final de uma qualificação, ou quando o lead "
+        "precisar de ação humana marcada (ligar, enviar orçamento, confirmar "
+        "pagamento).",
+        {"lead_id": {"type": "string", "description": "ID do lead no Kommo."},
+         "texto": {"type": "string", "description": "O que precisa ser feito."},
+         "prazo_horas": {"type": "integer", "description": "Prazo em horas a partir de agora (padrão 24)."}},
+        ["lead_id", "texto"],
+    ),
+]
+NOMES_KOMMO_CARTAO = {f["function"]["name"] for f in FERRAMENTAS_KOMMO_CARTAO}
+
+
 # Transcrição: por que aqui e não no trilho do n8n.
 #
 # Transcrever custa, e o custo é atribuído pela chave que faz a chamada. No n8n
@@ -380,9 +475,17 @@ def _ferramenta_enviar_arquivo(cliente: dict) -> dict | None:
 
 
 def _ferramentas_do_agente(cliente: dict) -> tuple:
-    """Handoff + arquivos + o que os MCPs do cliente oferecem. (lista, mapa)."""
+    """Handoff + arquivos + Kommo (nativo) + o que os MCPs do cliente oferecem.
+    (lista, mapa)."""
     ferramentas, mapa = _ferramentas_dos_mcps(cliente)
     extras = [FERRAMENTA_HUMANO]
+    # As 7 ferramentas do Cartão do Lead entram sozinhas sempre que o cliente
+    # tem Kommo cadastrado — não precisa mais ligar um MCP na aba Ferramentas
+    # pra ganhar isso (30/10/2026). Sem Kommo cadastrado, a ferramenta nem
+    # aparece: `_executar` chamaria com domínio/token vazios e o Kommo
+    # recusaria, então é melhor o modelo nunca ver a opção.
+    if db.obter_credenciais_kommo(cliente["id"]):
+        extras.extend(FERRAMENTAS_KOMMO_CARTAO)
     arquivo = _ferramenta_enviar_arquivo(cliente)
     if arquivo:
         extras.append(arquivo)
@@ -445,8 +548,14 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     # ferramentas embutidas saíram — e aí nenhum MCP recebia credencial.
     # Cliente sem Kommo cadastrado não pode perder o atendimento por causa
     # disso: a ferramenta falha sozinha e o resto da conversa segue.
+    # As ferramentas nativas do Cartão do Lead não passam por `mapa_mcp` (não
+    # são MCP) — por isso entram na checagem à parte.
+    precisa_kommo = (
+        any(m.get("credenciais_pedidas") for m in mapa_mcp.values())
+        or any(f["function"]["name"] in NOMES_KOMMO_CARTAO for f in ferramentas)
+    )
     credenciais = {}
-    if any(m.get("credenciais_pedidas") for m in mapa_mcp.values()):
+    if precisa_kommo:
         credenciais = db.obter_credenciais_kommo(cliente["id"])
         if not credenciais:
             db.registrar_log(cliente["id"], "erro",
@@ -520,6 +629,18 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
             )
             return ("ok: um atendente foi chamado e assume a partir de agora. "
                     "Avise o paciente em uma frase e não responda mais nada.")
+
+        if nome in NOMES_KOMMO_CARTAO:
+            # kommo_domain/access_token nunca vêm de `args` — o modelo nem tem
+            # como propor, porque não aparecem no schema (ver
+            # FERRAMENTAS_KOMMO_CARTAO). Só o cadastro do cliente entra.
+            dominio = (credenciais or {}).get("kommo_domain", "")
+            token = (credenciais or {}).get("access_token", "")
+            if not dominio or not token:
+                return "erro: este cliente ainda não tem Kommo cadastrado (configure na engrenagem)"
+            fn = getattr(kommo_cartao, nome)
+            parametros = {k: v for k, v in args.items() if k not in CHAVES_CREDENCIAL}
+            return fn(dominio, token, **parametros)
 
         # Ferramenta vinda de um MCP ligado a este cliente.
         m = (mapa_mcp or {}).get(nome)
