@@ -301,6 +301,14 @@ def garantir_schema():
             "CREATE INDEX IF NOT EXISTS idx_qa_avaliacoes_contato "
             "ON qa_avaliacoes (contato_id, criado_em DESC)"
         )
+        # Sugestão de melhoria de prompt baseada no QA (30/10/2026): depois
+        # que um número de avaliações ruins se acumula, o sistema PROPÕE um
+        # ajuste de prompt — nunca aplica sozinho (ver qa_atendimento.py,
+        # LIMIAR_PROBLEMAS_PARA_SUGESTAO). `usada_em_sugestao` impede gerar a
+        # mesma sugestão de novo a partir dos mesmos problemas já considerados.
+        conn.execute("ALTER TABLE qa_avaliacoes ADD COLUMN IF NOT EXISTS usada_em_sugestao BOOLEAN NOT NULL DEFAULT FALSE")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_melhoria_sugerida TEXT")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_melhoria_motivo TEXT")
         # Idempotência: o WhatsApp reentrega, e a fila reentrega no retry. Sem
         # esta trava o paciente recebe a mesma resposta duas vezes. O UNIQUE é a
         # garantia real — checar antes de processar é corrida, não trava.
@@ -514,6 +522,52 @@ def obter_avaliacao_qa_atual(contato_id: int) -> dict | None:
         "severidade": linha[0], "problemas": linha[1], "resumo": linha[2],
         "resolvido": linha[3], "criado_em": linha[4].isoformat(),
     }
+
+
+def qa_problemas_pendentes(cliente_id: int) -> list:
+    """Avaliações ruins deste cliente que ainda não entraram numa sugestão de
+    melhoria de prompt — não filtra por `resolvido`, que é "humano olhou essa
+    conversa", conceito diferente de "esse problema já virou sugestão"."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT qa.id, qa.resumo, qa.problemas
+              FROM qa_avaliacoes qa
+              JOIN contatos c ON c.id = qa.contato_id
+             WHERE c.cliente_id = %s AND qa.severidade != 'ok' AND qa.usada_em_sugestao = FALSE
+             ORDER BY qa.criado_em
+            """,
+            (cliente_id,),
+        ).fetchall()
+    return [{"id": r[0], "resumo": r[1], "problemas": r[2]} for r in linhas]
+
+
+def marcar_qa_usada_em_sugestao(ids: list):
+    if not ids:
+        return
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE qa_avaliacoes SET usada_em_sugestao = TRUE WHERE id = ANY(%s)",
+            (ids,),
+        )
+
+
+def salvar_sugestao_melhoria_prompt(cliente_id: int, prompt_sugerido: str, motivo: str):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET prompt_melhoria_sugerida = %s, prompt_melhoria_motivo = %s, "
+            "atualizado_em = now() WHERE id = %s",
+            (prompt_sugerido, motivo, cliente_id),
+        )
+
+
+def descartar_sugestao_melhoria_prompt(cliente_id: int):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET prompt_melhoria_sugerida = NULL, prompt_melhoria_motivo = NULL, "
+            "atualizado_em = now() WHERE id = %s",
+            (cliente_id,),
+        )
 
 
 def obter_contato(contato_id: int) -> dict | None:

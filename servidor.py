@@ -87,6 +87,11 @@ ROTA_CONTATO_RESET = re.compile(r"^/contatos/(\d+)/reset$")
 ROTA_CLIENTE_QA_RODAR = re.compile(r"^/clientes/(\d+)/qa/rodar$")
 ROTA_CONTATO_QA_RESOLVER = re.compile(r"^/contatos/(\d+)/qa/resolver$")
 ROTA_QA_RODAR_TODOS = re.compile(r"^/qa/rodar-todos$")
+# Sugestão de melhoria de prompt baseada em problemas recorrentes do QA —
+# só sugere, quem aplica é a rota de prompt que já existe (ver mais abaixo).
+ROTA_CLIENTE_QA_PENDENTES = re.compile(r"^/clientes/(\d+)/qa/pendentes$")
+ROTA_CLIENTE_QA_SUGERIR_MELHORIA = re.compile(r"^/clientes/(\d+)/qa/sugerir-melhoria$")
+ROTA_CLIENTE_QA_DESCARTAR_SUGESTAO = re.compile(r"^/clientes/(\d+)/qa/descartar-sugestao$")
 ROTA_FILA = re.compile(r"^/fila$")
 ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
 ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
@@ -421,6 +426,19 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        m = ROTA_CLIENTE_QA_PENDENTES.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            contagem = len(db.qa_problemas_pendentes(cliente_id))
+            self._responder_json(200, {
+                "contagem": contagem,
+                "limiar": qa_atendimento.LIMIAR_PROBLEMAS_PARA_SUGESTAO,
+            })
+            return
+
         m = ROTA_CLIENTE_ID.match(self.path)
         if m:
             cliente_id = int(m.group(1))
@@ -746,6 +764,44 @@ class Handler(BaseHTTPRequestHandler):
                 for k in total:
                     total[k] += r[k]
             self._responder_json(200, total)
+            return
+
+        m = ROTA_CLIENTE_QA_SUGERIR_MELHORIA.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            cliente = db.obter_cliente(cliente_id)
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            problemas = db.qa_problemas_pendentes(cliente_id)
+            if len(problemas) < qa_atendimento.LIMIAR_PROBLEMAS_PARA_SUGESTAO:
+                self._responder_json(400, {
+                    "error": f"ainda não há avaliações suficientes "
+                             f"({len(problemas)} de {qa_atendimento.LIMIAR_PROBLEMAS_PARA_SUGESTAO} necessárias)"})
+                return
+            sugestao = qa_atendimento.sugerir_melhoria_prompt(
+                cliente.get("prompt_sugerido"), problemas)
+            if sugestao is None:
+                db.registrar_log(cliente_id, "erro", "QA: falha ao gerar sugestão de melhoria de prompt.")
+                self._responder_json(502, {"error": "falha ao gerar a sugestão, tente de novo"})
+                return
+            db.salvar_sugestao_melhoria_prompt(
+                cliente_id, sugestao["prompt_sugerido"], sugestao["motivo"])
+            db.marcar_qa_usada_em_sugestao([p["id"] for p in problemas])
+            db.registrar_log(cliente_id, "sistema",
+                             f"QA: sugestão de melhoria de prompt gerada a partir de "
+                             f"{len(problemas)} avaliação(ões).")
+            self._responder_json(200, sugestao)
+            return
+
+        m = ROTA_CLIENTE_QA_DESCARTAR_SUGESTAO.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            db.descartar_sugestao_melhoria_prompt(cliente_id)
+            self._responder_json(200, {"descartado": True})
             return
 
         m = ROTA_CLIENTE_IMAGEM.match(self.path)

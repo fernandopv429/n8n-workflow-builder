@@ -1016,6 +1016,46 @@ def teste_qa_ignora_conversa_vazia_sem_chamar_a_openai():
     assert qa.avaliar_conversa("prompt", []) is None
 
 
+# --- sugestão de melhoria de prompt baseada no QA (30/10/2026) --------------
+# Fecha o ciclo do QA sem deixar a IA aplicar nada sozinha — só propõe, quem
+# aplica é a rota de prompt que já existe (com backup automático).
+
+def teste_sugestao_melhoria_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo():
+    """Mesmo cuidado do bug já achado em INSTRUCAO: o exemplo de JSON no meio
+    do texto tem que sobreviver ao str.format()."""
+    import qa_atendimento as qa
+    texto = qa.INSTRUCAO_MELHORIA.format(prompt_atual="atenda bem", problemas="- repetiu pergunta")
+    assert "atenda bem" in texto and "repetiu pergunta" in texto
+    assert '"prompt_sugerido"' in texto, "o JSON de exemplo sumiu ou quebrou o format()"
+
+
+def teste_sugestao_melhoria_aceita_resposta_valida():
+    qa, orig = _com_openai_dublado(
+        '{"prompt_sugerido": "Você é Bia...", "motivo": "parou de repetir pergunta"}')
+    try:
+        r = qa.sugerir_melhoria_prompt("prompt atual", [{"resumo": "repetiu pergunta", "problemas": []}])
+    finally:
+        qa.OpenAI = orig
+    assert r == {"prompt_sugerido": "Você é Bia...", "motivo": "parou de repetir pergunta"}
+
+
+def teste_sugestao_melhoria_rejeita_resposta_incompleta():
+    """prompt_sugerido ou motivo vazio não pode virar sugestão salva — melhor
+    None (painel mostra erro, pessoa tenta de novo) que meio-feito."""
+    qa, orig = _com_openai_dublado('{"prompt_sugerido": "", "motivo": "x"}')
+    try:
+        assert qa.sugerir_melhoria_prompt("prompt", [{"resumo": "x", "problemas": []}]) is None
+    finally:
+        qa.OpenAI = orig
+
+
+def teste_sugestao_melhoria_ignora_lista_vazia_sem_chamar_a_openai():
+    """Sem problema nenhum pra resolver, não tem o que sugerir — e não gasta
+    chamada de API à toa."""
+    import qa_atendimento as qa
+    assert qa.sugerir_melhoria_prompt("prompt", []) is None
+
+
 TESTES = [
     teste_mcp_local_tem_o_mesmo_contrato_do_n8n,
     teste_tags_preservam_as_existentes,
@@ -1069,6 +1109,10 @@ TESTES = [
     teste_qa_aceita_veredito_valido,
     teste_qa_rejeita_severidade_fora_do_enum,
     teste_qa_ignora_conversa_vazia_sem_chamar_a_openai,
+    teste_sugestao_melhoria_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
+    teste_sugestao_melhoria_aceita_resposta_valida,
+    teste_sugestao_melhoria_rejeita_resposta_incompleta,
+    teste_sugestao_melhoria_ignora_lista_vazia_sem_chamar_a_openai,
 ]
 
 

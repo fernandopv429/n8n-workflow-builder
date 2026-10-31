@@ -460,13 +460,17 @@ async function abrirGerenciamento(id) {
 
 async function carregarBriefing() {
   const caixa = document.getElementById('briefing-caixa');
-  let cliente;
+  let cliente, qa;
   try {
     cliente = await (await fetch(`/clientes/${clienteAtualId}`)).json();
   } catch (e) {
     caixa.style.display = 'none';
     return;
   }
+  // Contagem de problemas de QA é side-quest: se falhar, o resto da aba
+  // continua funcionando, só não mostra o bloco de sugestão.
+  try { qa = await (await fetch(`/clientes/${clienteAtualId}/qa/pendentes`)).json(); }
+  catch (e) { qa = { contagem: 0, limiar: 3 }; }
 
   // A caixa aparece SEMPRE, não só depois de um briefing: o prompt é o que o
   // agente usa pra falar com o paciente (worker_agente.py), e até 02/10/2026 só
@@ -478,6 +482,8 @@ async function carregarBriefing() {
   const estrutura = cliente.estrutura_kommo_sugerida
     ? JSON.stringify(cliente.estrutura_kommo_sugerida, null, 2) : '';
   const podeRestaurar = !!cliente.prompt_anterior;
+  const temSugestaoMelhoria = !!cliente.prompt_melhoria_sugerida;
+  const podeGerarSugestao = qa.contagem >= qa.limiar;
 
   {
     caixa.innerHTML = `
@@ -488,7 +494,23 @@ async function carregarBriefing() {
         ${podeRestaurar ? '<button type="button" class="handoff-botao" id="botao-restaurar-prompt">Restaurar versão anterior</button>' : ''}
         <span id="prompt-aviso" class="opcional"></span>
       </div>
-      ${estrutura ? `<details><summary>Estrutura de Kommo sugerida pelo briefing (ainda NÃO aplicada — peça no chat)</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>` : ''}`;
+      ${estrutura ? `<details><summary>Estrutura de Kommo sugerida pelo briefing (ainda NÃO aplicada — peça no chat)</summary><div class="briefing-conteudo">${escaparHtml(estrutura)}</div></details>` : ''}
+      <div class="briefing-rodape" style="margin-top:14px">
+        <button type="button" class="handoff-botao" id="botao-sugerir-melhoria" ${podeGerarSugestao ? '' : 'disabled'}
+                title="${podeGerarSugestao ? '' : `precisa de pelo menos ${qa.limiar} avaliações de QA com problema`}">
+          Gerar sugestão de melhoria (QA)</button>
+        <span class="opcional">${qa.contagem} de ${qa.limiar} avaliação(ões) de QA aguardando</span>
+      </div>
+      ${temSugestaoMelhoria ? `
+        <div class="qa-veredito">
+          <strong>Sugestão de melhoria de prompt (baseada no QA):</strong>
+          <p>${escaparHtml(cliente.prompt_melhoria_motivo || '')}</p>
+          <details><summary>Ver prompt sugerido</summary><div class="briefing-conteudo">${escaparHtml(cliente.prompt_melhoria_sugerida)}</div></details>
+          <div class="briefing-rodape" style="margin-top:8px">
+            <button type="button" class="handoff-botao" id="botao-aplicar-melhoria">Aplicar</button>
+            <button type="button" class="handoff-botao" id="botao-descartar-melhoria">Descartar</button>
+          </div>
+        </div>` : ''}`;
 
     document.getElementById('botao-salvar-prompt').addEventListener('click', async (ev) => {
       const b = ev.target;
@@ -520,6 +542,40 @@ async function carregarBriefing() {
         }
         aviso.textContent = `erro: ${corpo.error}`;
         b.disabled = false;
+      });
+    }
+
+    document.getElementById('botao-sugerir-melhoria').addEventListener('click', async (ev) => {
+      const b = ev.target;
+      b.disabled = true;
+      b.textContent = 'Gerando...';
+      const resp = await fetch(`/clientes/${clienteAtualId}/qa/sugerir-melhoria`, { method: 'POST' });
+      const corpo = await resp.json();
+      if (!resp.ok) {
+        alert(corpo.error || 'falha ao gerar sugestão');
+        b.disabled = false;
+        b.textContent = 'Gerar sugestão de melhoria (QA)';
+        return;
+      }
+      await carregarBriefing();
+      await carregarLogs();
+    });
+
+    if (temSugestaoMelhoria) {
+      document.getElementById('botao-aplicar-melhoria').addEventListener('click', async (ev) => {
+        ev.target.disabled = true;
+        await fetch(`/clientes/${clienteAtualId}/prompt`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: cliente.prompt_melhoria_sugerida }),
+        });
+        await fetch(`/clientes/${clienteAtualId}/qa/descartar-sugestao`, { method: 'POST' });
+        await carregarBriefing();
+        await carregarLogs();
+      });
+      document.getElementById('botao-descartar-melhoria').addEventListener('click', async (ev) => {
+        ev.target.disabled = true;
+        await fetch(`/clientes/${clienteAtualId}/qa/descartar-sugestao`, { method: 'POST' });
+        await carregarBriefing();
       });
     }
   }
