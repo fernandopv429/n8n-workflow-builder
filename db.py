@@ -97,32 +97,21 @@ def garantir_schema():
         # ruim — seja feita no painel, pelo chat de gerenciamento, ou pelo
         # próprio agente geral no WhatsApp (ver restaurar_prompt_anterior).
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_anterior TEXT")
-        # Migração 15/10/2026 (pedido do Fernando): o desenho de clonar um
-        # workflow por cliente no n8n foi substituído pelo worker central
-        # (worker_agente.py), que lê prompt/Kommo/OpenAI direto do Postgres —
-        # não existe mais "clone" nenhum. Clientes que ficaram com
-        # status='clonado' do desenho antigo viram 'ativo'; os workflows deles
-        # no n8n foram apagados à parte, então workflow_novo_id/url não
-        # apontam mais pra nada e são zerados junto.
-        # A constraint velha só aceitava 'clonado', não 'ativo' — precisa cair
-        # ANTES do UPDATE, senão o Postgres rejeita a troca de valor (e, como
-        # tudo aqui roda numa transação só, a migração inteira falha calada:
-        # o garantir_schema() captura a exceção pra não derrubar o container,
-        # e nem a coluna whatsapp_grupo_aviso chega a ser criada).
-        conn.execute("ALTER TABLE clientes DROP CONSTRAINT IF EXISTS clientes_status_check")
-        conn.execute(
-            "UPDATE clientes SET status = 'ativo', workflow_novo_id = NULL, "
-            "workflow_novo_url = NULL WHERE status = 'clonado'"
-        )
-        conn.execute(
-            "ALTER TABLE clientes ADD CONSTRAINT clientes_status_check "
-            "CHECK (status IN ('rascunho', 'ativo', 'erro'))"
-        )
-        # Só depois da migração acima (que ainda escreve nelas pra zerar
-        # clientes vindos do 'clonado') é que workflow_novo_id/url somem de
-        # vez — 30/10/2026, junto com o resto do clonador (cloner.py etc.).
-        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS workflow_novo_id")
-        conn.execute("ALTER TABLE clientes DROP COLUMN IF EXISTS workflow_novo_url")
+        # Migração 15/10/2026 (clonado->ativo) + 30/10/2026 (drop de
+        # workflow_novo_id/url) já rodaram com sucesso e cumpriram o papel —
+        # REMOVIDAS em 31/10/2026 depois de descobrir que elas travavam TODO
+        # schema daqui pra baixo em todo restart seguinte: o UPDATE ainda
+        # escrevia em workflow_novo_id/url, e como a primeira execução já
+        # tinha dropado essas colunas, toda execução seguinte batia em
+        # "column does not exist" e abortava a transação inteira — silencioso
+        # (garantir_schema() captura a exceção pra não derrubar o container),
+        # então nada depois deste ponto no arquivo era criado há dias (incluindo
+        # qa_avaliacoes.usada_em_sugestao, prompt_melhoria_* e
+        # metricas_ferramentas, todas adicionadas depois dessa migração no
+        # arquivo). Não precisa de substituto: o estado final (constraint
+        # 'rascunho'/'ativo'/'erro', sem as colunas) já está tanto na instalação
+        # nova (CREATE TABLE acima) quanto na produção (migração já rodou uma
+        # vez, com sucesso, antes desta remoção).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_mensagens (
                 id SERIAL PRIMARY KEY,
