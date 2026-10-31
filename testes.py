@@ -26,6 +26,35 @@ def teste_converte_param_json_do_kommo_pra_string():
     assert b["etapa_json"] == '{"name":"X"}'
 
 
+def teste_catalogo_esconde_o_kommo_completo_sempre_ativo():
+    """"Kommo MCP - Completo" é usado direto pelo chat de gerenciamento, pra
+    todo cliente, sem passar por cliente_mcps (ver agente_chat.py). Listar
+    ele na aba Ferramentas (30/10/2026, a pedido do Fernando) não ajuda — já
+    está ligado, não tem o que marcar — e marcar "no_atendimento" nele por
+    engano entregaria as ferramentas de estruturação de funil pro agente que
+    fala com o paciente, contra a decisão de 07/10/2026."""
+    import n8n_client
+    import mcp_cliente as m
+
+    class FalsoN8n:
+        def _request(self, metodo, caminho):
+            return {"data": [{"id": "1", "name": "Kommo MCP - Completo"},
+                             {"id": "2", "name": "Agenda"}]}
+        def get_workflow(self, wid):
+            path = "kommo-completo" if wid == "1" else "agenda"
+            return {"active": True, "nodes": [
+                {"type": "n8n-nodes-langchain.mcpTrigger",
+                 "parameters": {"path": path, "authentication": "headerAuth"}}]}
+
+    original = n8n_client.N8nClient
+    n8n_client.N8nClient = FalsoN8n
+    try:
+        achados = {c["path"] for c in m.catalogo()}
+    finally:
+        n8n_client.N8nClient = original
+    assert achados == {"agenda"}, achados
+
+
 # --- trava do kommo_atualizar_etapa (agente_chat._guarda_etapa_kommo) ---------
 # Em 29/09/2026 o chat renomeou a etapa "Contato inicial" para "MIA" porque
 # chutou o status_id, e em outra tentativa mandou PATCH pra etapa 142 e pra de
@@ -832,6 +861,7 @@ TESTES = [
     teste_imagem_vira_texto_preservando_a_legenda,
     teste_tipo_que_nao_lemos_tem_resposta_pronta,
     teste_converte_param_json_do_kommo_pra_string,
+    teste_catalogo_esconde_o_kommo_completo_sempre_ativo,
     teste_trava_barra_patch_na_etapa_errada,
     teste_trava_deixa_renomear_quando_confirmado,
     teste_trava_barra_etapas_que_o_kommo_nao_edita,

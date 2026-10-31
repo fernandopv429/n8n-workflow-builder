@@ -189,8 +189,20 @@ def _multi_inquilino_pelo_workflow(wf: dict) -> bool:
     return True
 
 
+# "Kommo MCP - Completo" (mcp_kommo_client.py) não é uma integração pluggable
+# — é usado direto, sempre, só pelo chat de gerenciamento (agente_chat.py:
+# _preparar_ferramentas_kommo roda pra TODO cliente, sem passar por
+# cliente_mcps). Listar ele aqui não ajuda (não tem nada pra ligar: já está
+# ligado) e é um risco: marcar "no_atendimento" nele entregaria as 17
+# ferramentas de estruturação de funil pro agente que fala com o paciente —
+# exatamente o que a decisão de 07/10/2026 (ver worker_agente.py) fechou a
+# porta pra isso (30/10/2026, a pedido do Fernando).
+PATH_SEMPRE_ATIVO_NO_CHAT = "kommo-completo"
+
+
 def catalogo() -> list:
-    """Todos os MCPs que existem no n8n, descobertos pelos próprios workflows.
+    """Todos os MCPs que existem no n8n, descobertos pelos próprios workflows
+    — exceto o que já está sempre ligado (ver PATH_SEMPRE_ATIVO_NO_CHAT).
 
     Evita digitar caminho na tela — e digitar caminho erra. O n8n é a fonte da
     verdade: MCP novo aparece aqui sozinho, MCP renomeado aparece com o nome
@@ -212,9 +224,12 @@ def catalogo() -> list:
         for n in wf.get("nodes", []):
             if "mcpTrigger" not in n.get("type", ""):
                 continue
+            path = (n.get("parameters") or {}).get("path", "")
+            if path == PATH_SEMPRE_ATIVO_NO_CHAT:
+                continue
             achados.append({
                 "nome": w["name"],
-                "path": (n.get("parameters") or {}).get("path", ""),
+                "path": path,
                 "ativo": bool(wf.get("active")),
                 "autenticado": bool((n.get("parameters") or {}).get("authentication")),
                 # lido do próprio workflow, sem abrir conexão com cada MCP:
