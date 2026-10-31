@@ -51,6 +51,7 @@ import mcp_kommo_client  # noqa: E402
 import monitor_fila  # noqa: E402
 import openai_admin  # noqa: E402
 import pocketbase_client  # noqa: E402
+import qa_atendimento  # noqa: E402
 import cofre  # noqa: E402
 import evolution_client  # noqa: E402
 from config import carregar_env  # noqa: E402
@@ -80,6 +81,12 @@ ROTA_CONTATO_MENSAGENS = re.compile(r"^/contatos/(\d+)/mensagens$")
 ROTA_CONTATO_STATUS = re.compile(r"^/contatos/(\d+)/status$")
 # Zera a memória de uma conversa sem apagar o contato (ver db.limpar_conversa).
 ROTA_CONTATO_RESET = re.compile(r"^/contatos/(\d+)/reset$")
+# QA de atendimento: um juiz (LLM) relê a conversa e aponta problema — ver
+# qa_atendimento.py. /qa/rodar-todos existe pra já deixar pronto o alvo de um
+# futuro Schedule Trigger do n8n (mesmo padrão do resumo de atendimento acima).
+ROTA_CLIENTE_QA_RODAR = re.compile(r"^/clientes/(\d+)/qa/rodar$")
+ROTA_CONTATO_QA_RESOLVER = re.compile(r"^/contatos/(\d+)/qa/resolver$")
+ROTA_QA_RODAR_TODOS = re.compile(r"^/qa/rodar-todos$")
 ROTA_FILA = re.compile(r"^/fila$")
 ROTA_CLIENTE_CONSUMO = re.compile(r"^/clientes/(\d+)/consumo$")
 ROTA_CLIENTE_PROMPT = re.compile(r"^/clientes/(\d+)/prompt$")
@@ -271,6 +278,7 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(200, {
                 "contato": contato,
                 "mensagens": db.listar_mensagens_agente(contato_id, limite=200),
+                "qa": db.obter_avaliacao_qa_atual(contato_id),
             })
             return
 
@@ -698,6 +706,37 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(200, {"restaurado": True})
             return
 
+        m = ROTA_CLIENTE_QA_RODAR.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            cliente = db.obter_cliente(cliente_id)
+            if cliente is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            self._responder_json(200, self._rodar_qa(cliente))
+            return
+
+        m = ROTA_CONTATO_QA_RESOLVER.match(self.path)
+        if m:
+            contato_id = int(m.group(1))
+            if db.obter_contato(contato_id) is None:
+                self._responder_json(404, {"error": "contato não encontrado"})
+                return
+            db.marcar_qa_resolvida(contato_id)
+            self._responder_json(200, {"resolvido": True})
+            return
+
+        if ROTA_QA_RODAR_TODOS.match(self.path):
+            total = {"avaliados": 0, "atencao": 0, "critico": 0}
+            for cliente in db.listar_clientes():
+                if cliente["status"] != "ativo":
+                    continue
+                r = self._rodar_qa(cliente)
+                for k in total:
+                    total[k] += r[k]
+            self._responder_json(200, total)
+            return
+
         m = ROTA_CLIENTE_IMAGEM.match(self.path)
         if m:
             self._enviar_imagem(int(m.group(1)))
@@ -725,6 +764,28 @@ class Handler(BaseHTTPRequestHandler):
         # pela Batch API lá mesmo.
         cliente_id = db.criar_cliente_rascunho(cliente_nome)
         self._responder_json(200, _com_imagem(db.obter_cliente(cliente_id)))
+
+    def _rodar_qa(self, cliente: dict) -> dict:
+        """Reavalia só quem tem mensagem nova desde a última rodada (ver
+        db.contatos_pendentes_de_qa) — quem não mudou não paga de novo pelo
+        mesmo veredito. Usado tanto por /clientes/<id>/qa/rodar quanto, em
+        loop, por /qa/rodar-todos."""
+        resultado = {"avaliados": 0, "atencao": 0, "critico": 0}
+        for contato in db.contatos_pendentes_de_qa(cliente["id"]):
+            mensagens = db.listar_mensagens_agente(contato["id"], limite=200)
+            veredito = qa_atendimento.avaliar_conversa(cliente.get("prompt_sugerido"), mensagens)
+            if veredito is None:
+                db.registrar_log(cliente["id"], "erro",
+                                 f"QA: falha ao avaliar conversa do contato {contato['id']}.")
+                continue
+            db.registrar_avaliacao_qa(
+                contato["id"], veredito["severidade"], veredito["problemas"],
+                veredito["resumo"], contato["ultima_mensagem_id"],
+            )
+            resultado["avaliados"] += 1
+            if veredito["severidade"] in ("atencao", "critico"):
+                resultado[veredito["severidade"]] += 1
+        return resultado
 
     def _enviar_imagem(self, cliente_id: int):
         """Recebe a imagem em base64 num JSON — evita ter que fazer o parse de

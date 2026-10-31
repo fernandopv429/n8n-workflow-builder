@@ -280,6 +280,27 @@ def garantir_schema():
             "CREATE INDEX IF NOT EXISTS idx_agente_mensagens_contato "
             "ON agente_mensagens (contato_id, criado_em)"
         )
+        # QA de atendimento (30/10/2026): um juiz (LLM) relê a conversa e
+        # aponta problema — "ok"/"atencao"/"critico". Append-only (uma linha
+        # por rodada de análise); o estado atual de um contato é sempre a
+        # linha mais recente dele. `ultima_mensagem_id` é o que permite
+        # reavaliar só quem tem mensagem nova desde a última rodada.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS qa_avaliacoes (
+                id SERIAL PRIMARY KEY,
+                contato_id INTEGER NOT NULL REFERENCES contatos(id) ON DELETE CASCADE,
+                severidade TEXT NOT NULL CHECK (severidade IN ('ok', 'atencao', 'critico')),
+                problemas JSONB NOT NULL DEFAULT '[]',
+                resumo TEXT NOT NULL,
+                ultima_mensagem_id INTEGER NOT NULL,
+                resolvido BOOLEAN NOT NULL DEFAULT FALSE,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_qa_avaliacoes_contato "
+            "ON qa_avaliacoes (contato_id, criado_em DESC)"
+        )
         # Idempotência: o WhatsApp reentrega, e a fila reentrega no retry. Sem
         # esta trava o paciente recebe a mesma resposta duas vezes. O UNIQUE é a
         # garantia real — checar antes de processar é corrida, não trava.
@@ -373,8 +394,14 @@ def listar_contatos(cliente_id: int, limite: int = 100) -> list:
             SELECT c.id, c.id_whatsapp, c.nome, c.status, c.ultima_mensagem,
                    (SELECT conteudo FROM agente_mensagens m
                      WHERE m.contato_id = c.id ORDER BY m.criado_em DESC LIMIT 1),
-                   (SELECT count(*) FROM agente_mensagens m WHERE m.contato_id = c.id)
+                   (SELECT count(*) FROM agente_mensagens m WHERE m.contato_id = c.id),
+                   qa.severidade, qa.resumo
               FROM contatos c
+              LEFT JOIN LATERAL (
+                  SELECT severidade, resumo FROM qa_avaliacoes
+                   WHERE contato_id = c.id AND resolvido = FALSE
+                   ORDER BY criado_em DESC LIMIT 1
+              ) qa ON TRUE
              WHERE c.cliente_id = %s
              ORDER BY c.ultima_mensagem DESC NULLS LAST
              LIMIT %s
@@ -382,7 +409,7 @@ def listar_contatos(cliente_id: int, limite: int = 100) -> list:
             (cliente_id, limite),
         ).fetchall()
     campos = ("id", "id_whatsapp", "nome", "status", "ultima_mensagem",
-              "ultima_fala", "total_mensagens")
+              "ultima_fala", "total_mensagens", "qa_severidade", "qa_resumo")
     # isoformat como o resto do módulo (listar_logs, listar_mensagens): datetime
     # cru estoura no json.dumps da resposta e derruba a conexão sem explicação
     return [
@@ -390,6 +417,81 @@ def listar_contatos(cliente_id: int, limite: int = 100) -> list:
          "ultima_mensagem": l[4].isoformat() if l[4] else None}
         for l in linhas
     ]
+
+
+def contatos_pendentes_de_qa(cliente_id: int, limite: int = 15) -> list:
+    """Contatos com resposta do agente mais nova que a última análise de QA
+    (ou nunca analisados) — é só isso que `qa/rodar` precisa reler. Reavaliar
+    quem não mudou desde a última rodada seria pagar de novo pelo mesmo
+    veredito."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT c.id, ultima.id
+              FROM contatos c
+              JOIN LATERAL (
+                  SELECT id FROM agente_mensagens
+                   WHERE contato_id = c.id AND role = 'assistant'
+                   ORDER BY id DESC LIMIT 1
+              ) ultima ON TRUE
+              LEFT JOIN LATERAL (
+                  SELECT ultima_mensagem_id FROM qa_avaliacoes
+                   WHERE contato_id = c.id
+                   ORDER BY criado_em DESC LIMIT 1
+              ) qa ON TRUE
+             WHERE c.cliente_id = %s
+               AND (qa.ultima_mensagem_id IS NULL OR ultima.id > qa.ultima_mensagem_id)
+             ORDER BY ultima.id
+             LIMIT %s
+            """,
+            (cliente_id, limite),
+        ).fetchall()
+    return [{"id": r[0], "ultima_mensagem_id": r[1]} for r in linhas]
+
+
+def registrar_avaliacao_qa(contato_id: int, severidade: str, problemas: list,
+                            resumo: str, ultima_mensagem_id: int):
+    with _conectar() as conn:
+        conn.execute(
+            """
+            INSERT INTO qa_avaliacoes
+                (contato_id, severidade, problemas, resumo, ultima_mensagem_id)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (contato_id, severidade, json.dumps(problemas), resumo, ultima_mensagem_id),
+        )
+
+
+def marcar_qa_resolvida(contato_id: int) -> bool:
+    with _conectar() as conn:
+        linha = conn.execute(
+            """
+            UPDATE qa_avaliacoes SET resolvido = TRUE
+             WHERE id = (SELECT id FROM qa_avaliacoes
+                          WHERE contato_id = %s ORDER BY criado_em DESC LIMIT 1)
+            RETURNING id
+            """,
+            (contato_id,),
+        ).fetchone()
+    return linha is not None
+
+
+def obter_avaliacao_qa_atual(contato_id: int) -> dict | None:
+    with _conectar() as conn:
+        linha = conn.execute(
+            """
+            SELECT severidade, problemas, resumo, resolvido, criado_em
+              FROM qa_avaliacoes WHERE contato_id = %s
+             ORDER BY criado_em DESC LIMIT 1
+            """,
+            (contato_id,),
+        ).fetchone()
+    if not linha:
+        return None
+    return {
+        "severidade": linha[0], "problemas": linha[1], "resumo": linha[2],
+        "resolvido": linha[3], "criado_em": linha[4].isoformat(),
+    }
 
 
 def obter_contato(contato_id: int) -> dict | None:
@@ -570,7 +672,24 @@ def obter_cliente(cliente_id: int) -> dict | None:
 
 def listar_clientes() -> list:
     with _conectar() as conn:
-        cur = conn.execute("SELECT * FROM clientes ORDER BY criado_em DESC")
+        # qa_pendentes: quantos contatos deste cliente têm, como veredito mais
+        # recente AINDA não resolvido, algo diferente de "ok" — mesma regra de
+        # badge usada em listar_contatos, só que contada por cliente pro card
+        # do dashboard. _linha_para_cliente mapeia por nome de coluna, então a
+        # subquery nomeada já chega pronta no dict, sem código extra.
+        cur = conn.execute("""
+            SELECT c.*, (
+                SELECT count(*) FROM (
+                    SELECT DISTINCT ON (qa.contato_id) qa.severidade
+                      FROM qa_avaliacoes qa
+                      JOIN contatos ct ON ct.id = qa.contato_id
+                     WHERE ct.cliente_id = c.id AND qa.resolvido = FALSE
+                     ORDER BY qa.contato_id, qa.criado_em DESC
+                ) latest
+                WHERE latest.severidade != 'ok'
+            ) AS qa_pendentes
+            FROM clientes c ORDER BY c.criado_em DESC
+        """)
         return [_linha_para_cliente(cur, r) for r in cur.fetchall()]
 
 

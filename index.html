@@ -151,6 +151,7 @@
   #painel-prompt .briefing-rodape { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
 
   /* Atendimento e saúde da fila */
+  #painel-atendimento .briefing-rodape { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .contato-linha {
     display: flex; align-items: center; gap: 10px; padding: 8px 10px;
     border-top: 1px solid var(--border); cursor: pointer;
@@ -162,6 +163,13 @@
   .etiqueta { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
   .etiqueta.humano { border-color: #b78a2e; color: #e0b457; }
   .etiqueta.ia { color: var(--muted); }
+  /* QA de atendimento: mesma lógica de cor do resto do painel (status/etiqueta) */
+  .etiqueta.qa-atencao { border-color: #b78a2e; color: #e0b457; }
+  .etiqueta.qa-critico { border-color: var(--err); color: var(--err); }
+  .qa-veredito { padding: 10px 12px; margin-bottom: 10px; border-radius: 8px;
+                 border: 1px solid var(--border); background: var(--card); }
+  .qa-veredito.qa-critico { border-color: var(--err); }
+  .qa-veredito ul { margin: 6px 0 0; padding-left: 18px; }
   .contato-conversa { padding: 10px 12px 14px; border-top: 1px solid var(--border); }
   .contato-conversa .msg { margin-bottom: 6px; }
   /* Aviso de fila: só aparece quando há algo errado — banner permanente vira
@@ -309,6 +317,10 @@
   <!-- Atendimento é o agente falando COM o paciente. O chat é você falando
        SOBRE o cliente. Misturar os dois já confundiu na tela antiga. -->
   <div class="painel-aba" id="painel-atendimento" style="display:none">
+    <div class="briefing-rodape" style="margin-bottom:12px">
+      <button type="button" class="handoff-botao" id="botao-analisar-qa">Analisar atendimento</button>
+      <span id="qa-aviso" class="opcional"></span>
+    </div>
     <div id="atendimento-lista"></div>
   </div>
 
@@ -549,6 +561,8 @@ async function carregarClientes() {
       ${imagem}
       <h3>${escaparHtml(c.cliente_nome)}</h3>
       <div class="status ${c.status}">${c.status}</div>
+      ${c.qa_pendentes ? `<div class="etiqueta qa-critico" style="margin-top:6px">
+        ${c.qa_pendentes} pra revisar</div>` : ''}
       <div class="data" style="margin-top:6px">criado em ${data}</div>`;
     el.addEventListener('click', () => abrirGerenciamento(c.id));
 
@@ -1390,6 +1404,9 @@ async function carregarAtendimento() {
       <span class="contato-quem">${escaparHtml(c.nome || c.id_whatsapp)}</span>
       <span class="etiqueta ${c.status === 'HUMANO' ? 'humano' : 'ia'}">
         ${c.status === 'HUMANO' ? 'atendente' : 'IA'}</span>
+      ${c.qa_severidade && c.qa_severidade !== 'ok'
+        ? `<span class="etiqueta qa-${c.qa_severidade}" title="${escaparHtml(c.qa_resumo || '')}">
+             ${c.qa_severidade === 'critico' ? 'QA: crítico' : 'QA: atenção'}</span>` : ''}
       <span class="contato-fala">${escaparHtml(c.ultima_fala || '')}</span>
     </div>
     <div class="contato-conversa" id="conversa-${c.id}" style="display:none"></div>
@@ -1400,15 +1417,41 @@ async function carregarAtendimento() {
   });
 }
 
+document.getElementById('botao-analisar-qa').addEventListener('click', async (ev) => {
+  const b = ev.target;
+  const aviso = document.getElementById('qa-aviso');
+  b.disabled = true;
+  b.textContent = 'Analisando...';
+  try {
+    const r = await (await fetch(`/clientes/${clienteAtualId}/qa/rodar`, { method: 'POST' })).json();
+    aviso.textContent = r.avaliados
+      ? `${r.avaliados} avaliada(s) — ${r.critico} crítica(s), ${r.atencao} com atenção`
+      : 'nenhuma conversa nova pra avaliar';
+    await carregarAtendimento();
+  } catch (e) {
+    aviso.textContent = 'erro: ' + e;
+  } finally {
+    b.disabled = false;
+    b.textContent = 'Analisar atendimento';
+  }
+});
+
 async function abrirConversa(contatoId) {
   const caixa = document.getElementById(`conversa-${contatoId}`);
   if (caixa.style.display !== 'none') { caixa.style.display = 'none'; return; }
   caixa.style.display = 'block';
   caixa.textContent = 'carregando…';
 
-  const { contato, mensagens } = await (await fetch(`/contatos/${contatoId}/mensagens`)).json();
+  const { contato, mensagens, qa } = await (await fetch(`/contatos/${contatoId}/mensagens`)).json();
   const assumir = contato.status !== 'HUMANO';
+  const mostrarQa = qa && !qa.resolvido && qa.severidade !== 'ok';
   caixa.innerHTML =
+    (mostrarQa ? `
+      <div class="qa-veredito qa-${qa.severidade}">
+        <strong>QA — ${qa.severidade === 'critico' ? 'crítico' : 'atenção'}:</strong> ${escaparHtml(qa.resumo)}
+        ${qa.problemas.length ? `<ul>${qa.problemas.map(p => `<li>${escaparHtml(p)}</li>`).join('')}</ul>` : ''}
+        <button type="button" class="handoff-botao" id="qa-resolver-${contatoId}" style="margin-top:8px">Marcar como revisado</button>
+      </div>` : '') +
     mensagens.map(m => `<div class="msg ${m.role}">${escaparHtml(m.conteudo)}</div>`).join('') +
     `<div class="acoes-conversa">
        <button type="button" class="handoff-botao" id="handoff-${contatoId}">` +
@@ -1416,6 +1459,17 @@ async function abrirConversa(contatoId) {
     `</button>
        <button type="button" class="handoff-botao" id="reset-${contatoId}">Zerar conversa</button>
      </div>`;
+
+  if (mostrarQa) {
+    document.getElementById(`qa-resolver-${contatoId}`).addEventListener('click', async (ev) => {
+      ev.target.disabled = true;
+      await fetch(`/contatos/${contatoId}/qa/resolver`, { method: 'POST' });
+      // carregarAtendimento substitui a lista inteira (fecha a conversa
+      // junto) — reabrir pega o card já sem o aviso de QA.
+      await carregarAtendimento();
+      await abrirConversa(contatoId);
+    });
+  }
 
   document.getElementById(`handoff-${contatoId}`).addEventListener('click', async () => {
     await fetch(`/contatos/${contatoId}/status`, {

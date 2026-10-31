@@ -671,6 +671,77 @@ def teste_erro_do_kommo_chega_legivel_no_modelo():
     assert "status_id" in r, "o detalhe do Kommo se perdeu"
 
 
+# --- QA de atendimento (qa_atendimento.py) ------------------------------
+# O prompt do juiz tem um exemplo de JSON literal no meio do template —
+# achado ao escrever o módulo (30/10/2026): `str.format()` tenta resolver
+# QUALQUER `{...}` como placeholder, não só `{prompt_cliente}`/`{conversa}`,
+# e isso quebrava toda chamada com KeyError, engolido pelo `except Exception`
+# de `avaliar_conversa` — nunca apareceria como erro óbvio, só como "toda
+# avaliação falha" sem explicação. Este teste tranca que o template renderiza.
+
+def _com_openai_dublado(conteudo_resposta):
+    """Troca a classe OpenAI usada por qa_atendimento por uma dublê que devolve
+    `conteudo_resposta` (string) como se fosse `choices[0].message.content`."""
+    import os
+    import config
+    import qa_atendimento as qa
+
+    # a chave em si nunca é usada (a classe toda é dublê) — só precisa existir
+    # pra carregar_env() não estourar KeyError antes de chegar na dublagem
+    os.environ.setdefault("OPENAI_API_KEY", "sk-teste-fake")
+    config._cache = None
+
+    class _Resposta:
+        choices = [type("Escolha", (), {
+            "message": type("Msg", (), {"content": conteudo_resposta})()})]
+
+    class _ChatDublado:
+        def create(self, **kwargs):
+            return _Resposta()
+
+    class _OpenAIDublado:
+        def __init__(self, **kwargs):
+            self.chat = type("Chat", (), {"completions": _ChatDublado()})()
+
+    original = qa.OpenAI
+    qa.OpenAI = _OpenAIDublado
+    return qa, original
+
+
+def teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo():
+    import qa_atendimento as qa
+    texto = qa.INSTRUCAO.format(prompt_cliente="atenda bem", conversa="paciente: oi")
+    assert "atenda bem" in texto and "paciente: oi" in texto
+    # o exemplo de formato tem que sobreviver literal, chaves incluídas
+    assert '"severidade"' in texto, "o JSON de exemplo sumiu ou quebrou o format()"
+
+
+def teste_qa_aceita_veredito_valido():
+    qa, orig = _com_openai_dublado(
+        '{"severidade": "atencao", "problemas": ["repetiu a pergunta"], "resumo": "x"}')
+    try:
+        r = qa.avaliar_conversa("prompt", [{"role": "user", "conteudo": "oi"},
+                                           {"role": "assistant", "conteudo": "olá"}])
+    finally:
+        qa.OpenAI = orig
+    assert r == {"severidade": "atencao", "problemas": ["repetiu a pergunta"], "resumo": "x"}
+
+
+def teste_qa_rejeita_severidade_fora_do_enum():
+    """Veredito mal-formado não pode virar dado gravado — melhor None (quem
+    chama loga erro e tenta de novo depois) que uma severidade inventada."""
+    qa, orig = _com_openai_dublado('{"severidade": "ruim", "problemas": [], "resumo": "x"}')
+    try:
+        assert qa.avaliar_conversa("prompt", [{"role": "user", "conteudo": "oi"}]) is None
+    finally:
+        qa.OpenAI = orig
+
+
+def teste_qa_ignora_conversa_vazia_sem_chamar_a_openai():
+    import qa_atendimento as qa
+    assert qa.avaliar_conversa("prompt", []) is None
+
+
 TESTES = [
     teste_mcp_local_tem_o_mesmo_contrato_do_n8n,
     teste_tags_preservam_as_existentes,
@@ -708,6 +779,10 @@ TESTES = [
     teste_nao_deixa_projeto_orfao_se_a_chave_nao_vier,
     teste_erro_da_openai_carrega_o_corpo,
     teste_reset_so_dispara_em_comando_exato,
+    teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
+    teste_qa_aceita_veredito_valido,
+    teste_qa_rejeita_severidade_fora_do_enum,
+    teste_qa_ignora_conversa_vazia_sem_chamar_a_openai,
 ]
 
 
