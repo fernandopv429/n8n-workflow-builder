@@ -106,6 +106,9 @@ ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
 # (quem dispara o envio é um Schedule Trigger no n8n, chamando estas rotas).
 ROTA_CLIENTE_GRUPO_AVISO = re.compile(r"^/clientes/(\d+)/grupo-aviso$")
 ROTA_CLIENTE_RESUMO = re.compile(r"^/clientes/(\d+)/resumo$")
+# Relatório de atendimento (handoff + tempo de resposta humana de verdade —
+# ver eventos_atendimento em db.py). `/<dias>` opcional, padrão 30.
+ROTA_CLIENTE_ATENDIMENTO_RELATORIO = re.compile(r"^/clientes/(\d+)/atendimento-relatorio(?:/(\d+))?$")
 ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
 # Visão agregada de todos os clientes — quantas vezes cada ferramenta é
 # chamada, quanto demora, quanto falha (ver metricas.py). `/metricas/<dias>`
@@ -424,6 +427,16 @@ class Handler(BaseHTTPRequestHandler):
                 "grupo": cliente.get("whatsapp_grupo_aviso") or "",
                 **db.resumo_atendimento(cliente_id),
             })
+            return
+
+        m = ROTA_CLIENTE_ATENDIMENTO_RELATORIO.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            dias = int(m.group(2)) if m.group(2) else 30
+            self._responder_json(200, db.relatorio_atendimento(cliente_id, dias))
             return
 
         m = ROTA_CLIENTE_QA_PENDENTES.match(self.path)

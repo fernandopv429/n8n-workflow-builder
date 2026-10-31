@@ -330,6 +330,26 @@ def garantir_schema():
             "CREATE INDEX IF NOT EXISTS idx_metricas_ferramentas_consulta "
             "ON metricas_ferramentas (ferramenta, criado_em DESC)"
         )
+        # Eventos de atendimento (31/10/2026): quando o agente pede handoff e
+        # quando um humano de fato responde de verdade — base pro relatório
+        # por cliente (quantidade de atendimento, tempo até resposta humana).
+        # `humano_respondeu` vem do mesmo mecanismo já provado no workflow
+        # "Ecossistema IA - Bruno" (node "FromMe?"): qualquer mensagem
+        # enviada manualmente pelo WhatsApp, não pela nossa API, chega como
+        # `fromMe: true` no webhook — ver trilho_n8n.py/CODIGO_NORMALIZA.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS eventos_atendimento (
+                id SERIAL PRIMARY KEY,
+                contato_id INTEGER NOT NULL REFERENCES contatos(id) ON DELETE CASCADE,
+                tipo TEXT NOT NULL CHECK (tipo IN ('handoff_solicitado', 'humano_respondeu')),
+                detalhe JSONB,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eventos_atendimento_contato "
+            "ON eventos_atendimento (contato_id, criado_em)"
+        )
 
 
 # --- estado do agente de atendimento ------------------------------------
@@ -671,6 +691,63 @@ def resumo_atendimento(cliente_id: int) -> dict:
             (cliente_id,),
         ).fetchone()
     return {"atendidos_hoje": linha[0] or 0, "atendidos_mes": linha[1] or 0}
+
+
+def registrar_evento_atendimento(contato_id: int, tipo: str, detalhe: dict = None):
+    with _conectar() as conn:
+        conn.execute(
+            "INSERT INTO eventos_atendimento (contato_id, tipo, detalhe) VALUES (%s, %s, %s)",
+            (contato_id, tipo, json.dumps(detalhe) if detalhe is not None else None),
+        )
+
+
+def relatorio_atendimento(cliente_id: int, dias: int = 30) -> dict:
+    """Quantidade de atendimentos no período + cada handoff pedido, pareado
+    com a resposta humana de verdade seguinte (se já tiver vindo) — é daí
+    que sai o tempo de resposta. Handoff sem `humano_respondeu` ainda
+    (`resposta_em` None) significa que ninguém assumiu de verdade até agora."""
+    with _conectar() as conn:
+        atendimentos = conn.execute(
+            """
+            SELECT count(DISTINCT c.id) FROM contatos c
+              JOIN agente_mensagens m ON m.contato_id = c.id
+             WHERE c.cliente_id = %s AND m.role = 'assistant'
+               AND m.criado_em >= now() - make_interval(days => %s)
+            """,
+            (cliente_id, dias),
+        ).fetchone()[0]
+
+        handoffs = conn.execute(
+            """
+            SELECT h.contato_id, c.nome, c.id_whatsapp, h.detalhe->>'motivo' AS motivo,
+                   h.criado_em AS handoff_em, r.criado_em AS resposta_em,
+                   EXTRACT(EPOCH FROM (r.criado_em - h.criado_em))::int AS tempo_resposta_segundos
+              FROM eventos_atendimento h
+              JOIN contatos c ON c.id = h.contato_id
+              LEFT JOIN LATERAL (
+                  SELECT criado_em FROM eventos_atendimento
+                   WHERE contato_id = h.contato_id AND tipo = 'humano_respondeu'
+                     AND criado_em > h.criado_em
+                   ORDER BY criado_em LIMIT 1
+              ) r ON TRUE
+             WHERE c.cliente_id = %s AND h.tipo = 'handoff_solicitado'
+               AND h.criado_em >= now() - make_interval(days => %s)
+             ORDER BY h.criado_em DESC
+            """,
+            (cliente_id, dias),
+        ).fetchall()
+
+    campos = ("contato_id", "nome", "id_whatsapp", "motivo", "handoff_em",
+              "resposta_em", "tempo_resposta_segundos")
+    return {
+        "atendimentos": atendimentos or 0,
+        "handoffs": [
+            {**dict(zip(campos, h)),
+             "handoff_em": h[4].isoformat() if h[4] else None,
+             "resposta_em": h[5].isoformat() if h[5] else None}
+            for h in handoffs
+        ],
+    }
 
 
 def registrar_mensagem_processada(mensagem_id: str, cliente_id: int) -> bool:

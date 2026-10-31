@@ -308,6 +308,7 @@
       <button type="button" class="aba" data-aba="prompt">Prompt</button>
       <button type="button" class="aba" data-aba="atendimento">
         Atendimento <span id="atendimento-resumo" class="opcional"></span></button>
+      <button type="button" class="aba" data-aba="analise">Análise</button>
       <button type="button" class="aba" data-aba="whatsapp">WhatsApp</button>
       <button type="button" class="aba" data-aba="ferramentas">Ferramentas</button>
       <button type="button" class="aba" data-aba="arquivos">Arquivos</button>
@@ -329,6 +330,10 @@
       <span id="qa-aviso" class="opcional"></span>
     </div>
     <div id="atendimento-lista"></div>
+  </div>
+
+  <div class="painel-aba" id="painel-analise" style="display:none">
+    <div id="analise-conteudo"></div>
   </div>
 
   <div class="painel-aba" id="painel-whatsapp" style="display:none">
@@ -832,6 +837,7 @@ function trocarAba(nome) {
   if (nome === 'logs') carregarLogs();
   if (nome === 'prompt') carregarBriefing();
   if (nome === 'atendimento') carregarAtendimento();
+  if (nome === 'analise') carregarAnalise();
   if (nome === 'consumo') carregarConsumo();
   if (nome === 'whatsapp') carregarWhatsapp();
   if (nome === 'ferramentas') carregarFerramentas();
@@ -1446,6 +1452,58 @@ async function carregarArquivos() {
     });
     carregarArquivos();
   }));
+}
+
+// --- Análise de atendimento: handoff e tempo de resposta humana ------------
+// "Resposta de verdade" é a próxima mensagem fromMe=true que chega do
+// WhatsApp (worker_agente.py), não o aviso automático do agente avisando
+// que vai transferir — ver trilho_n8n.py/CODIGO_NORMALIZA.
+function _formatarDuracao(segundos) {
+  if (segundos < 60) return `${segundos}s`;
+  if (segundos < 3600) return `${Math.round(segundos / 60)} min`;
+  return `${(segundos / 3600).toFixed(1)} h`;
+}
+
+async function carregarAnalise(dias) {
+  dias = dias || 30;
+  const caixa = document.getElementById('analise-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let d;
+  try {
+    d = await (await fetch(`/clientes/${clienteAtualId}/atendimento-relatorio/${dias}`)).json();
+  } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+
+  const linhas = (d.handoffs || []).map(h => `
+    <tr>
+      <td>${escaparHtml(h.nome || h.id_whatsapp)}</td>
+      <td>${escaparHtml(h.motivo || '')}</td>
+      <td>${new Date(h.handoff_em).toLocaleString('pt-BR')}</td>
+      <td>${h.resposta_em
+        ? _formatarDuracao(h.tempo_resposta_segundos)
+        : '<span class="opcional">ainda sem resposta</span>'}</td>
+    </tr>`).join('');
+
+  caixa.innerHTML = `
+    <p class="hint">Quando o agente pediu um atendente, e quanto tempo levou até uma
+      pessoa responder de verdade no WhatsApp — não o aviso automático do agente
+      dizendo que vai transferir.</p>
+    <div class="linha" style="gap:8px; margin-bottom:12px">
+      <label for="analise-periodo">Período:</label>
+      <select id="analise-periodo">
+        <option value="7"${dias === 7 ? ' selected' : ''}>últimos 7 dias</option>
+        <option value="30"${dias === 30 ? ' selected' : ''}>últimos 30 dias</option>
+        <option value="90"${dias === 90 ? ' selected' : ''}>últimos 90 dias</option>
+      </select>
+      <span class="opcional">${d.atendimentos || 0} atendimento(s) no período</span>
+    </div>
+    <table class="tabela-consumo">
+      <thead><tr><th>contato</th><th>motivo</th><th>handoff pedido em</th><th>tempo até resposta humana</th></tr></thead>
+      <tbody>${linhas || '<tr><td colspan="4">nenhum handoff nesse período.</td></tr>'}</tbody>
+    </table>`;
+
+  document.getElementById('analise-periodo').addEventListener('change', (ev) => {
+    carregarAnalise(Number(ev.target.value));
+  });
 }
 
 async function carregarConsumo() {

@@ -211,12 +211,26 @@ FERRAMENTA_HUMANO = {
                 "motivo": {
                     "type": "string",
                     "description": "Por que está passando — aparece no painel pro atendente.",
-                }
+                },
+                "lead_id": {
+                    "type": "string",
+                    "description": (
+                        "Se você já sabe o ID do lead no Kommo desta conversa "
+                        "(de uma consulta anterior), informe aqui — o lead ganha "
+                        "uma tag marcando que foi transferido pra atendente "
+                        "humano. Deixe vazio se não souber; não é obrigatório "
+                        "descobrir só pra isso."
+                    ),
+                },
             },
             "required": ["motivo"],
         },
     },
 }
+
+# Tag fixa aplicada no Kommo quando o handoff tem lead_id conhecido — fica
+# visível direto na conta do cliente, sem precisar abrir o painel.
+TAG_TRANSFERIDO_ATENDENTE = "Transferido: atendente"
 
 
 # Ferramentas do Cartão do Lead (Kommo), nativas — 30/10/2026: antes essas 7
@@ -626,10 +640,34 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
         if nome == "chamar_humano":
             motivo = str(args.get("motivo") or "sem motivo informado")
             db.definir_status_contato(contato_id, "HUMANO")
+            db.registrar_evento_atendimento(contato_id, "handoff_solicitado", {"motivo": motivo})
             db.registrar_log(
                 cliente_id, "sistema",
                 f"[worker] conversa passada pra atendente humano. Motivo: {motivo}",
             )
+            # Tag no Kommo é bônus, não requisito: só acontece se o modelo já
+            # sabia o lead_id (de uma consulta anterior nesta conversa) — não
+            # vale a pena buscar por telefone só pra isso (fora de escopo por
+            # enquanto). Falha aqui nunca pode atrapalhar o handoff de verdade.
+            lead_id = str(args.get("lead_id") or "").strip()
+            dominio = (credenciais or {}).get("kommo_domain", "")
+            token = (credenciais or {}).get("access_token", "")
+            if lead_id and dominio and token:
+                try:
+                    # consultar_cartao_lead/adicionar_tag nunca levantam exceção
+                    # (@_legivel devolve "erro: ..." como string) — por isso o
+                    # prefixo é checado na mão, não um try/except em volta delas.
+                    bruto = kommo_cartao.consultar_cartao_lead(dominio, token, lead_id)
+                    if bruto.startswith("erro"):
+                        raise RuntimeError(bruto)
+                    tags_atuais = json.loads(bruto).get("tags_atuais", "")
+                    resultado_tag = kommo_cartao.adicionar_tag(
+                        dominio, token, lead_id, TAG_TRANSFERIDO_ATENDENTE, tags_atuais)
+                    if resultado_tag.startswith("erro"):
+                        raise RuntimeError(resultado_tag)
+                except Exception as e:  # noqa: BLE001 — tag é bônus, handoff já aconteceu
+                    db.registrar_log(cliente_id, "erro",
+                                     f"[worker] falha ao marcar tag de handoff no Kommo: {e}")
             return ("ok: um atendente foi chamado e assume a partir de agora. "
                     "Avise o paciente em uma frase e não responda mais nada.")
 
@@ -720,6 +758,21 @@ def processar(payload: dict) -> dict:
 
     if mensagem_id and not db.registrar_mensagem_processada(mensagem_id, cliente_id):
         return None  # reentrega do WhatsApp ou da fila — já respondemos esta
+
+    # Humano respondeu de verdade, direto no WhatsApp — não é mensagem do
+    # paciente nem passa pelo agente. Vem do trilho encaminhando fromMe=true
+    # (ver trilho_n8n.py/CODIGO_NORMALIZA): nesta instância Evolution/Baileys
+    # só mensagem mandada por uma pessoa (não pela nossa API) volta assim.
+    if tipo == "humano_respondeu":
+        contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, "")
+        # Força HUMANO mesmo se já estava — mesma trava de segurança do
+        # workflow "Ecossistema IA - Bruno": se um atendente escreve direto
+        # no WhatsApp sem passar pelo painel ou pelo chamar_humano, o agente
+        # para sozinho, sem precisar de ninguém clicar "Assumir".
+        db.definir_status_contato(contato["id"], "HUMANO")
+        db.registrar_evento_atendimento(contato["id"], "humano_respondeu",
+                                        {"mensagem_id": mensagem_id})
+        return None
 
     # Mídia: o trilho manda a referência, os bytes vêm da Evolution e a leitura
     # acontece aqui, com a chave do cliente (ver `transcrever`/`descrever_imagem`).

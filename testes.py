@@ -590,16 +590,18 @@ def teste_normalizador_classifica_cada_tipo_de_midia():
             assert obtido.get("mensagem_id") == "ABC", f"{nome}: perdeu o mensagem_id"
 
 
-def teste_grupo_e_eco_do_proprio_agente_continuam_descartados():
-    """Mexer na classificação de mídia não pode reabrir o loop do fromMe."""
+def teste_grupo_e_status_continuam_descartados_mesmo_com_fromme():
+    """Grupo/status não é atendimento individual — tem que ser descartado
+    mesmo quando a mensagem é fromMe=true (grupo + fromMe aconteceria se o
+    próprio número da A5 estiver NO grupo e mandar uma mensagem nele)."""
     import json as _json
     import subprocess
     import tempfile
     import trilho_n8n
 
     casos = [
-        ("eco do agente", {"id": "A", "remoteJid": "5511999@s.whatsapp.net", "fromMe": True}),
         ("grupo", {"id": "B", "remoteJid": "123456@g.us"}),
+        ("grupo com fromMe", {"id": "B2", "remoteJid": "123456@g.us", "fromMe": True}),
         ("status", {"id": "C", "remoteJid": "status@broadcast"}),
     ]
     for nome, chave in casos:
@@ -615,6 +617,39 @@ def teste_grupo_e_eco_do_proprio_agente_continuam_descartados():
         r = subprocess.run(["node", caminho], capture_output=True, text=True, timeout=30)
         assert r.returncode == 0, f"{nome}: {r.stderr[:200]}"
         assert _json.loads(r.stdout) == [], f"{nome}: deveria ser descartado"
+
+
+def teste_fromme_de_conversa_individual_vira_humano_respondeu():
+    """31/10/2026: fromMe=true numa conversa individual deixou de ser eco
+    descartado — nesta instância Evolution/Baileys, só mensagem mandada por
+    uma pessoa de verdade (não pela nossa API) volta como fromMe=true (ver
+    node "FromMe?" do workflow "Ecossistema IA - Bruno"), então agora vira
+    sinal de resposta humana de verdade."""
+    import json as _json
+    import subprocess
+    import tempfile
+    import trilho_n8n
+
+    entrada = {"body": {"instance": "minha-instancia", "data": {
+        "key": {"id": "MSG123", "remoteJid": "5511999@s.whatsapp.net", "fromMe": True},
+        "message": {"imageMessage": {}},
+    }}}
+    js = (f"const entrada = {_json.dumps(entrada)};\n"
+          "const $input = { first: () => ({ json: entrada }) };\n"
+          f"const saida = (() => {{{trilho_n8n.CODIGO_NORMALIZA}}})();\n"
+          "console.log(JSON.stringify(saida));\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(js)
+        caminho = f.name
+    r = subprocess.run(["node", caminho], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[:200]
+    saida = _json.loads(r.stdout)
+    assert saida == [{"json": {
+        "tipo": "humano_respondeu",
+        "instancia": "minha-instancia",
+        "id_whatsapp": "5511999",
+        "mensagem_id": "MSG123",
+    }}], saida
 
 
 def teste_imagem_vira_texto_preservando_a_legenda():
@@ -945,6 +980,92 @@ def teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo():
     assert r.startswith("erro:") and "Kommo" in r, r
 
 
+# --- chamar_humano: evento de handoff + tag no Kommo (31/10/2026) ----------
+
+def _com_db_e_kommo_dublados():
+    """Troca db.definir_status_contato/registrar_evento_atendimento/
+    registrar_log e kommo_cartao.consultar_cartao_lead/adicionar_tag por
+    dublês que só registram as chamadas — handoff não pode depender de
+    Postgres nem do Kommo de verdade pra ser testado."""
+    import db
+    import kommo_cartao
+    chamadas = []
+    originais = {
+        "status": db.definir_status_contato,
+        "evento": db.registrar_evento_atendimento,
+        "log": db.registrar_log,
+        "consultar": kommo_cartao.consultar_cartao_lead,
+        "tag": kommo_cartao.adicionar_tag,
+    }
+    db.definir_status_contato = lambda *a: chamadas.append(("status", a))
+    db.registrar_evento_atendimento = lambda *a: chamadas.append(("evento", a))
+    db.registrar_log = lambda *a: chamadas.append(("log", a))
+    kommo_cartao.consultar_cartao_lead = lambda *a: (
+        chamadas.append(("consultar", a)) or '{"tags_atuais": "vip"}')
+    kommo_cartao.adicionar_tag = lambda *a: (
+        chamadas.append(("tag", a)) or '{"tags_agora": ["vip", "Transferido: atendente"]}')
+    return chamadas, originais
+
+
+def _restaura_db_e_kommo(originais):
+    import db
+    import kommo_cartao
+    db.definir_status_contato = originais["status"]
+    db.registrar_evento_atendimento = originais["evento"]
+    db.registrar_log = originais["log"]
+    kommo_cartao.consultar_cartao_lead = originais["consultar"]
+    kommo_cartao.adicionar_tag = originais["tag"]
+
+
+def teste_chamar_humano_grava_evento_e_nao_mexe_no_kommo_sem_lead_id():
+    import worker_agente as w
+    chamadas, originais = _com_db_e_kommo_dublados()
+    try:
+        r = w._executar("chamar_humano", {"motivo": "pediu atendente"}, {}, cliente_id=1, contato_id=9)
+    finally:
+        _restaura_db_e_kommo(originais)
+    assert r.startswith("ok:"), r
+    tipos = [c[0] for c in chamadas]
+    assert "status" in tipos and "evento" in tipos
+    assert "consultar" not in tipos and "tag" not in tipos, "sem lead_id não pode chamar o Kommo"
+    evento = next(c[1] for c in chamadas if c[0] == "evento")
+    assert evento == (9, "handoff_solicitado", {"motivo": "pediu atendente"})
+
+
+def teste_chamar_humano_marca_tag_quando_tem_lead_id_e_credencial():
+    import worker_agente as w
+    chamadas, originais = _com_db_e_kommo_dublados()
+    try:
+        r = w._executar(
+            "chamar_humano", {"motivo": "pediu atendente", "lead_id": "555"},
+            {"kommo_domain": "cliente", "access_token": "tok"}, cliente_id=1, contato_id=9)
+    finally:
+        _restaura_db_e_kommo(originais)
+    assert r.startswith("ok:"), r
+    consulta = next(c[1] for c in chamadas if c[0] == "consultar")
+    assert consulta == ("cliente", "tok", "555")
+    tag = next(c[1] for c in chamadas if c[0] == "tag")
+    assert tag == ("cliente", "tok", "555", w.TAG_TRANSFERIDO_ATENDENTE, "vip")
+
+
+def teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff():
+    """A tag é bônus — se o Kommo recusar, o handoff (status + evento) já
+    aconteceu antes e tem que continuar valendo."""
+    import worker_agente as w
+    import kommo_cartao
+    chamadas, originais = _com_db_e_kommo_dublados()
+    kommo_cartao.consultar_cartao_lead = lambda *a: "erro: Kommo respondeu 404"
+    try:
+        r = w._executar(
+            "chamar_humano", {"motivo": "pediu atendente", "lead_id": "555"},
+            {"kommo_domain": "cliente", "access_token": "tok"}, cliente_id=1, contato_id=9)
+    finally:
+        _restaura_db_e_kommo(originais)
+    assert r.startswith("ok:"), r
+    tipos = [c[0] for c in chamadas]
+    assert tipos.count("log") == 2, "tem que logar o handoff E o erro da tag"
+
+
 # --- QA de atendimento (qa_atendimento.py) ------------------------------
 # O prompt do juiz tem um exemplo de JSON literal no meio do template —
 # achado ao escrever o módulo (30/10/2026): `str.format()` tenta resolver
@@ -1071,7 +1192,8 @@ TESTES = [
     teste_url_do_arquivo_aponta_pra_colecao_do_painel,
     teste_arquivo_grande_demais_e_barrado_antes_de_subir,
     teste_normalizador_classifica_cada_tipo_de_midia,
-    teste_grupo_e_eco_do_proprio_agente_continuam_descartados,
+    teste_grupo_e_status_continuam_descartados_mesmo_com_fromme,
+    teste_fromme_de_conversa_individual_vira_humano_respondeu,
     teste_imagem_vira_texto_preservando_a_legenda,
     teste_tipo_que_nao_lemos_tem_resposta_pronta,
     teste_converte_param_json_do_kommo_pra_string,
@@ -1105,6 +1227,9 @@ TESTES = [
     teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao,
     teste_executar_kommo_cartao_ignora_credencial_do_modelo,
     teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo,
+    teste_chamar_humano_grava_evento_e_nao_mexe_no_kommo_sem_lead_id,
+    teste_chamar_humano_marca_tag_quando_tem_lead_id_e_credencial,
+    teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff,
     teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
     teste_qa_aceita_veredito_valido,
     teste_qa_rejeita_severidade_fora_do_enum,

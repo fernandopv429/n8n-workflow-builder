@@ -71,10 +71,26 @@ CODIGO_NORMALIZA = r"""
 const body = $input.first().json.body || $input.first().json || {};
 const dados = body.data || body;
 const chave = dados.key || {};
+const remoteJid = chave.remoteJid || '';
 
-// fromMe: eco da própria resposta do agente. Processar isso faria o agente
-// conversar consigo mesmo em loop.
-if (chave.fromMe === true) return [];
+// grupo (@g.us) e status não são atendimento individual — checado ANTES do
+// fromMe, senão eco de grupo (ou mensagem humana numa transmissão) passaria.
+if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid.startsWith('status@')) return [];
+
+// fromMe: nesta instância Evolution/Baileys, mensagem mandada pela NOSSA
+// própria API não volta como um novo fromMe=true no webhook — só mensagem
+// mandada por uma pessoa de verdade, direto no WhatsApp (app/Web), volta
+// (mesmo mecanismo já em produção no workflow "Ecossistema IA - Bruno",
+// node "FromMe?"). Por isso processamos em vez de descartar: é o sinal de
+// que um humano respondeu de verdade, não eco do próprio agente.
+if (chave.fromMe === true) {
+  return [{ json: {
+    tipo: 'humano_respondeu',
+    instancia: body.instance || dados.instance || '',
+    id_whatsapp: remoteJid.split('@')[0],
+    mensagem_id: chave.id || '',
+  } }];
+}
 
 const msg = dados.message || {};
 const texto = (
@@ -84,10 +100,6 @@ const texto = (
   (msg.videoMessage && msg.videoMessage.caption) ||
   ''
 ).trim();
-
-const remoteJid = chave.remoteJid || '';
-// grupo (@g.us) e status não são atendimento individual
-if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid.startsWith('status@')) return [];
 
 // Mídia vai pra fila SEM os bytes: o webhook não os traz, e quem busca na
 // Evolution é o worker — lá a chamada usa a chave do cliente, e o custo da
