@@ -41,6 +41,7 @@ import db  # noqa: E402
 import kommo_cartao  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
+import metricas  # noqa: E402
 import evolution_client
 import pocketbase_client  # noqa: E402
 
@@ -577,9 +578,11 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
                 args = json.loads(chamada.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            resultado = _executar(nome, args, credenciais, cliente["id"],
+            resultado = metricas.medir(
+                "worker", cliente["id"], nome,
+                lambda: _executar(nome, args, credenciais, cliente["id"],
                                   contato["id"], mapa_mcp,
-                                  cliente=cliente, contato=contato)
+                                  cliente=cliente, contato=contato))
             mensagens.append({
                 "role": "tool", "tool_call_id": chamada.id, "content": resultado[:4000]
             })

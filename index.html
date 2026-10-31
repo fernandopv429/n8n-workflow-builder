@@ -267,6 +267,8 @@
          cards, e não numa aba de cliente. -->
     <button type="button" class="handoff-botao" id="botao-geral"
             style="margin-bottom:14px">Agente geral (WhatsApp da A5)</button>
+    <button type="button" class="handoff-botao" id="botao-metricas"
+            style="margin-bottom:14px">Métricas de ferramentas</button>
     <div class="grid" id="grid-clientes"></div>
   </section>
 
@@ -287,6 +289,11 @@
 <section id="tela-geral" class="pagina-larga">
   <button class="voltar" id="botao-voltar-geral">&larr; voltar</button>
   <div class="painel-aba" id="geral-conteudo" style="overflow-y:auto"></div>
+</section>
+
+<section id="tela-metricas" class="pagina-larga">
+  <button class="voltar" id="botao-voltar-metricas">&larr; voltar</button>
+  <div class="painel-aba" id="metricas-conteudo" style="overflow-y:auto"></div>
 </section>
 
 <section id="tela-gerenciamento" class="pagina-larga">
@@ -421,6 +428,7 @@ function esconderTelas() {
   telaPasso1.style.display = 'none';
   telaGerenciamento.style.display = 'none';
   document.getElementById('tela-geral').style.display = 'none';
+  document.getElementById('tela-metricas').style.display = 'none';
 }
 
 function mostrarDashboard() {
@@ -921,6 +929,58 @@ async function abrirGeral() {
   await carregarGeral();
 }
 
+// --- Métricas de ferramentas -------------------------------------------
+// Visão agregada de todos os clientes, não de um só — por isso é tela
+// própria no dashboard, não uma aba dentro do cliente.
+async function abrirMetricas() {
+  pararEspera();
+  clienteAtualId = null;
+  esconderTelas();
+  document.getElementById('tela-metricas').style.display = 'flex';
+  await carregarMetricas();
+}
+
+async function carregarMetricas(dias) {
+  dias = dias || 7;
+  const caixa = document.getElementById('metricas-conteudo');
+  caixa.innerHTML = 'carregando…';
+  let dados;
+  try {
+    dados = (await (await fetch(`/metricas/${dias}`)).json()).metricas || [];
+  } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
+
+  const linhas = dados.map(m => `
+    <tr>
+      <td>${escaparHtml(m.ferramenta)}</td>
+      <td>${escaparHtml(m.origem)}</td>
+      <td style="text-align:right">${m.chamadas}</td>
+      <td style="text-align:right">${m.duracao_media_ms} ms</td>
+      <td style="text-align:right">${m.taxa_erro_pct}%</td>
+    </tr>`).join('');
+
+  caixa.innerHTML = `
+    <p class="hint">Quantas vezes cada ferramenta foi chamada, quanto demora e
+      quanto falha — no agente que fala com o paciente, no chat de
+      gerenciamento e no agente geral. Ordenado pelas mais chamadas: é onde
+      cache ou tirar do MCP rende mais.</p>
+    <div class="linha" style="gap:8px; margin-bottom:12px">
+      <label for="metricas-periodo">Período:</label>
+      <select id="metricas-periodo">
+        <option value="1"${dias === 1 ? ' selected' : ''}>último dia</option>
+        <option value="7"${dias === 7 ? ' selected' : ''}>últimos 7 dias</option>
+        <option value="30"${dias === 30 ? ' selected' : ''}>últimos 30 dias</option>
+      </select>
+    </div>
+    <table class="tabela-consumo">
+      <thead><tr><th>ferramenta</th><th>origem</th><th>chamadas</th><th>tempo médio</th><th>taxa de erro</th></tr></thead>
+      <tbody>${linhas || '<tr><td colspan="5">nenhuma chamada registrada nesse período.</td></tr>'}</tbody>
+    </table>`;
+
+  document.getElementById('metricas-periodo').addEventListener('change', (ev) => {
+    carregarMetricas(Number(ev.target.value));
+  });
+}
+
 async function carregarGeral() {
   const caixa = document.getElementById('geral-conteudo');
   caixa.innerHTML = 'carregando…';
@@ -1098,6 +1158,8 @@ function mostrarQrGeral(r) {
 
 document.getElementById('botao-geral').addEventListener('click', abrirGeral);
 document.getElementById('botao-voltar-geral').addEventListener('click', mostrarDashboard);
+document.getElementById('botao-metricas').addEventListener('click', abrirMetricas);
+document.getElementById('botao-voltar-metricas').addEventListener('click', mostrarDashboard);
 
 async function carregarFerramentas() {
   const caixa = document.getElementById('ferramentas-conteudo');

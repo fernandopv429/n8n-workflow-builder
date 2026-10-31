@@ -311,6 +311,28 @@ def garantir_schema():
                 processada_em TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        # Métricas de ferramenta (30/10/2026): quantas vezes cada ferramenta é
+        # chamada, quanto demora, quanto falha — nos três lugares que executam
+        # ferramenta (worker_agente.py, agente_chat.py, agente_geral.py). É o
+        # dado que embasa decisão de onde vale repetir o que já foi feito com
+        # o Kommo (tirar do MCP, cachear schema/transporte). `ferramenta` já
+        # identifica o MCP de origem sem coluna extra: nome de MCP vem
+        # prefixado pelo apelido (mcp_cliente.SEPARADOR), nativa não.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS metricas_ferramentas (
+                id SERIAL PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                origem TEXT NOT NULL CHECK (origem IN ('worker', 'chat', 'geral')),
+                ferramenta TEXT NOT NULL,
+                sucesso BOOLEAN NOT NULL,
+                duracao_ms INTEGER NOT NULL,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metricas_ferramentas_consulta "
+            "ON metricas_ferramentas (ferramenta, criado_em DESC)"
+        )
 
 
 # --- estado do agente de atendimento ------------------------------------
@@ -736,6 +758,40 @@ def listar_logs(cliente_id: int, limite: int = 50) -> list:
         {"tipo": r[0], "mensagem": r[1], "detalhe": r[2], "criado_em": r[3].isoformat()}
         for r in linhas
     ]
+
+
+def registrar_metrica_ferramenta(cliente_id: int, origem: str, ferramenta: str,
+                                  sucesso: bool, duracao_ms: int):
+    with _conectar() as conn:
+        conn.execute(
+            """
+            INSERT INTO metricas_ferramentas (cliente_id, origem, ferramenta, sucesso, duracao_ms)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (cliente_id, origem, ferramenta, bool(sucesso), int(duracao_ms)),
+        )
+
+
+def agregado_metricas_ferramentas(dias: int = 7) -> list:
+    """Resumo por ferramenta nos últimos `dias`: quantas chamadas, tempo
+    médio, taxa de erro — ordenado pelas mais chamadas primeiro, que é onde
+    cache/tirar do MCP rende mais."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT ferramenta, origem,
+                   count(*) AS chamadas,
+                   round(avg(duracao_ms))::int AS duracao_media_ms,
+                   round(100.0 * count(*) FILTER (WHERE NOT sucesso) / count(*), 1)::float AS taxa_erro_pct
+              FROM metricas_ferramentas
+             WHERE criado_em >= now() - make_interval(days => %s)
+             GROUP BY ferramenta, origem
+             ORDER BY chamadas DESC
+            """,
+            (dias,),
+        ).fetchall()
+    campos = ("ferramenta", "origem", "chamadas", "duracao_media_ms", "taxa_erro_pct")
+    return [dict(zip(campos, l)) for l in linhas]
 
 
 # --- chat ---------------------------------------------------------

@@ -33,6 +33,7 @@ sys.path.insert(0, RAIZ)
 import agente_chat  # noqa: E402
 import config  # noqa: E402
 import db  # noqa: E402
+import metricas  # noqa: E402
 
 CHAVE_INSTANCIA = "instancia_agente_geral"
 MAX_HISTORICO = 20
@@ -208,7 +209,9 @@ def responder(demandante: dict, contato: dict, texto: str) -> str:
                 args = json.loads(chamada.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            resultado = _executar(chamada.function.name, args, demandante)
+            resultado = metricas.medir(
+                "geral", demandante["cliente_id"], chamada.function.name,
+                lambda: _executar(chamada.function.name, args, demandante))
             db.registrar_log(
                 demandante["cliente_id"], "tool_call",
                 f"[agente geral] {chamada.function.name} -> {resultado[:200]}")

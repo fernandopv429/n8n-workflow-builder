@@ -102,6 +102,11 @@ ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
 ROTA_CLIENTE_GRUPO_AVISO = re.compile(r"^/clientes/(\d+)/grupo-aviso$")
 ROTA_CLIENTE_RESUMO = re.compile(r"^/clientes/(\d+)/resumo$")
 ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
+# Visão agregada de todos os clientes — quantas vezes cada ferramenta é
+# chamada, quanto demora, quanto falha (ver metricas.py). `/metricas/<dias>`
+# é opcional (padrão 7) — path, não query string, pro mesmo padrão das
+# outras rotas daqui.
+ROTA_METRICAS = re.compile(r"^/metricas(?:/(\d+))?$")
 # Ferramentas por cliente: integração nova vira MCP novo no n8n, e aqui se
 # escolhe quem usa o quê. O catálogo é descoberto do próprio n8n.
 # Agente geral: número da A5 por onde o próprio cliente pede mudanças no
@@ -394,6 +399,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if ROTA_CLIENTES_AVISO.match(self.path):
             self._responder_json(200, {"clientes": db.listar_clientes_com_grupo_aviso()})
+            return
+
+        m = ROTA_METRICAS.match(self.path)
+        if m:
+            dias = int(m.group(1)) if m.group(1) else 7
+            self._responder_json(200, {"metricas": db.agregado_metricas_ferramentas(dias)})
             return
 
         m = ROTA_CLIENTE_RESUMO.match(self.path)

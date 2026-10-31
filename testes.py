@@ -140,6 +140,95 @@ def teste_cache_de_transporte_e_autocurativo():
         m._cache_transporte.pop("algumpath", None)
 
 
+# --- métricas de ferramenta (metricas.py, 30/10/2026) -----------------------
+# Dado pra decidir onde vale repetir o que já foi feito com o Kommo (tirar do
+# MCP, cachear) — sem saber o que é mais chamado/mais lento, é chute.
+
+def _com_metrica_dublada():
+    """Troca db.registrar_metrica_ferramenta por um dublê que só guarda as
+    chamadas — nenhum teste aqui precisa de Postgres de verdade."""
+    import db
+    gravadas = []
+    original = db.registrar_metrica_ferramenta
+    def falso(cliente_id, origem, ferramenta, sucesso, duracao_ms):
+        gravadas.append((cliente_id, origem, ferramenta, sucesso, duracao_ms))
+    db.registrar_metrica_ferramenta = falso
+    return gravadas, original
+
+
+def teste_medir_grava_sucesso_e_devolve_o_resultado_intacto():
+    import db
+    import metricas
+
+    gravadas, original = _com_metrica_dublada()
+    try:
+        r = metricas.medir("worker", 7, "consultar_cartao_lead", lambda: "ok: 1 lead")
+    finally:
+        db.registrar_metrica_ferramenta = original
+    assert r == "ok: 1 lead", "o resultado não pode vir alterado"
+    assert len(gravadas) == 1
+    cliente_id, origem, ferramenta, sucesso, duracao_ms = gravadas[0]
+    assert (cliente_id, origem, ferramenta) == (7, "worker", "consultar_cartao_lead")
+    assert sucesso is True
+    assert duracao_ms >= 0
+
+
+def teste_medir_reconhece_erro_sem_mudar_o_retorno():
+    """Convenção do sistema: "erro: ..." é falha sem levantar exceção. A
+    métrica tem que reconhecer isso como sucesso=False, mas o texto de erro
+    ainda tem que chegar intacto em quem chamou — é o que o paciente/painel
+    precisa ver."""
+    import db
+    import metricas
+
+    gravadas, original = _com_metrica_dublada()
+    try:
+        r = metricas.medir("chat", 3, "kommo_criar_funil", lambda: "erro: campo sort faltando")
+    finally:
+        db.registrar_metrica_ferramenta = original
+    assert r == "erro: campo sort faltando"
+    assert gravadas[0][3] is False, "erro: ... tinha que marcar sucesso=False"
+
+
+def teste_medir_deixa_excecao_subir_e_ainda_assim_grava():
+    """agente_geral.py não captura exceção no dispatch (ao contrário de
+    worker_agente.py/agente_chat.py) — medir() não pode mudar isso: a
+    exceção tem que subir igual a antes, só que com a métrica já gravada."""
+    import db
+    import metricas
+
+    gravadas, original = _com_metrica_dublada()
+    def explode():
+        raise RuntimeError("Kommo fora do ar")
+    try:
+        try:
+            metricas.medir("geral", 9, "mudar_prompt", explode)
+            raise AssertionError("devia ter deixado a exceção subir")
+        except RuntimeError as e:
+            assert "Kommo fora do ar" in str(e)
+    finally:
+        db.registrar_metrica_ferramenta = original
+    assert len(gravadas) == 1
+    assert gravadas[0][3] is False, "exceção tinha que marcar sucesso=False"
+
+
+def teste_medir_nao_derruba_se_a_gravacao_falhar():
+    """Falha ao gravar métrica (banco fora do ar, etc) não pode virar falha
+    de atendimento — o resultado da ferramenta tem que chegar igual."""
+    import db
+    import metricas
+
+    original = db.registrar_metrica_ferramenta
+    def explode_ao_gravar(*a, **kw):
+        raise RuntimeError("banco fora do ar")
+    db.registrar_metrica_ferramenta = explode_ao_gravar
+    try:
+        r = metricas.medir("worker", 1, "chamar_humano", lambda: "ok: chamado")
+    finally:
+        db.registrar_metrica_ferramenta = original
+    assert r == "ok: chamado"
+
+
 # --- trava do kommo_atualizar_etapa (agente_chat._guarda_etapa_kommo) ---------
 # Em 29/09/2026 o chat renomeou a etapa "Contato inicial" para "MIA" porque
 # chutou o status_id, e em outra tentativa mandou PATCH pra etapa 142 e pra de
@@ -950,6 +1039,10 @@ TESTES = [
     teste_listar_ferramentas_usa_cache_e_nao_vaza_apelido_entre_chamadas,
     teste_cache_de_ferramentas_expira_pelo_ttl,
     teste_cache_de_transporte_e_autocurativo,
+    teste_medir_grava_sucesso_e_devolve_o_resultado_intacto,
+    teste_medir_reconhece_erro_sem_mudar_o_retorno,
+    teste_medir_deixa_excecao_subir_e_ainda_assim_grava,
+    teste_medir_nao_derruba_se_a_gravacao_falhar,
     teste_trava_barra_patch_na_etapa_errada,
     teste_trava_deixa_renomear_quando_confirmado,
     teste_trava_barra_etapas_que_o_kommo_nao_edita,

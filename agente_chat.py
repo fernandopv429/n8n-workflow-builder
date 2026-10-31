@@ -32,6 +32,7 @@ from openai import OpenAI  # noqa: E402
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
 import mcp_kommo_client  # noqa: E402
+import metricas  # noqa: E402
 
 MODELO = "gpt-4o-mini"
 # Quantas rodadas de tool-call o chat encadeia num turno. 6 era pouco pra tarefa
@@ -594,7 +595,9 @@ def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
         })
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments or "{}")
-            resultado = _executar_ferramenta(tc.function.name, args, cliente_id)
+            resultado = metricas.medir(
+                "chat", cliente_id, tc.function.name,
+                lambda: _executar_ferramenta(tc.function.name, args, cliente_id))
             db.registrar_log(
                 cliente_id, "tool_call",
                 f"{tc.function.name}({json.dumps(args, ensure_ascii=False)}) -> {resultado[:200]}",
