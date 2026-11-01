@@ -116,6 +116,7 @@ ROTA_CLIENTE_ATENDIMENTO_RELATORIO = re.compile(r"^/clientes/(\d+)/atendimento-r
 # tentativa, nem esperar redeploy. Só leitura, usa a credencial já salva.
 ROTA_CLIENTE_KOMMO_TELEFONE = re.compile(r"^/clientes/(\d+)/kommo/telefone/([\d+ ()-]+)$")
 ROTA_CLIENTE_KOMMO_LEAD = re.compile(r"^/clientes/(\d+)/kommo/lead/(\d+)$")
+ROTA_CLIENTE_KOMMO_CONTATO = re.compile(r"^/clientes/(\d+)/kommo/contato/(\d+)$")
 ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
 # Visão agregada de todos os clientes — quantas vezes cada ferramenta é
 # chamada, quanto demora, quanto falha (ver metricas.py). `/metricas/<dias>`
@@ -467,6 +468,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._responder_json(404, {"error": "cliente sem Kommo cadastrado"})
                 return
             bruto = kommo_cartao.consultar_cartao_lead(
+                credenciais["kommo_domain"], credenciais["access_token"], m.group(2))
+            self._responder_json(200, json.loads(bruto) if not bruto.startswith("erro")
+                                 else {"erro": bruto})
+            return
+
+        m = ROTA_CLIENTE_KOMMO_CONTATO.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if not credenciais:
+                self._responder_json(404, {"error": "cliente sem Kommo cadastrado"})
+                return
+            bruto = kommo_cartao.consultar_contato(
                 credenciais["kommo_domain"], credenciais["access_token"], m.group(2))
             self._responder_json(200, json.loads(bruto) if not bruto.startswith("erro")
                                  else {"erro": bruto})

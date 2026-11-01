@@ -219,3 +219,14 @@ def buscar_lead_por_telefone(kommo_domain: str, access_token: str, telefone: str
     return json.dumps({
         "encontrado": True, "id": lead.get("id"), "tags": _tags_do_lead(lead),
     }, ensure_ascii=False)
+
+
+@_legivel
+def consultar_contato(kommo_domain: str, access_token: str, contato_id: str) -> str:
+    """Consulta um CONTATO do Kommo direto (não o lead) — é onde o telefone
+    de verdade mora, em `custom_fields_values`. Diagnóstico: `?with=contacts`
+    no lead só traz o id do contato, nunca os campos; pra ver o telefone tem
+    que buscar o contato por si só."""
+    d = _chamar(kommo_domain, access_token, "GET",
+                f"/api/v4/contacts/{urllib.parse.quote(str(contato_id))}")
+    return json.dumps(d, ensure_ascii=False)
