@@ -359,6 +359,12 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
 
     `ON CONFLICT DO UPDATE` em vez de SELECT-depois-INSERT: duas mensagens
     simultâneas do mesmo número criariam duas linhas na versão ingênua.
+
+    `criado_agora`: `xmax = 0` é o jeito do Postgres dizer "esta linha veio
+    do INSERT, não do caminho do ON CONFLICT" — é como o worker sabe que é a
+    primeira mensagem de verdade deste contato, sem outra consulta, pra
+    decidir se tenta provisionar a tag IA ATIVA no Kommo (ver
+    worker_agente.py:_provisionar_tag_ia_ativa).
     """
     with _conectar() as conn:
         linha = conn.execute(
@@ -368,11 +374,13 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
             ON CONFLICT (cliente_id, id_whatsapp) DO UPDATE
                 SET ultima_mensagem = now(),
                     nome = COALESCE(contatos.nome, EXCLUDED.nome)
-            RETURNING id, cliente_id, id_whatsapp, nome, status, respondeu_follow
+            RETURNING id, cliente_id, id_whatsapp, nome, status, respondeu_follow,
+                      (xmax = 0) AS criado_agora
             """,
             (cliente_id, id_whatsapp, nome or ""),
         ).fetchone()
-    campos = ("id", "cliente_id", "id_whatsapp", "nome", "status", "respondeu_follow")
+    campos = ("id", "cliente_id", "id_whatsapp", "nome", "status", "respondeu_follow",
+              "criado_agora")
     return dict(zip(campos, linha))
 
 

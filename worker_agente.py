@@ -235,21 +235,62 @@ FERRAMENTA_HUMANO = {
 # (31/10/2026, a pedido do Fernando).
 TAG_TRANSFERIDO_ATENDENTE = "LQIA"
 
-# Tag que, quando o cliente tem Kommo cadastrado, precisa estar no lead pra IA
-# responder — mesmo mecanismo do node "SE LEAD TEM A TAG" do workflow
-# "Ecossistema IA - Bruno" (Premium Film), que já roda assim em produção.
-# Convenção geral, não é nome nosso (31/10/2026, a pedido do Fernando).
+# Tag que o PRÓPRIO sistema adiciona no lead, na primeira mensagem de um
+# contato novo (ver _provisionar_tag_ia_ativa) — diferente da LQIA, que é
+# convenção dos clientes, esta é nossa. Enquanto o lead tiver esta tag e não
+# tiver a de transferência, a IA responde; convenção geral, vale pra
+# qualquer cliente com Kommo (31/10/2026, a pedido do Fernando).
 TAG_IA_ATIVA = "IA ATIVA"
 
 
-def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
-    """Decide, pela tag do Kommo, se a IA pode responder este contato agora.
+def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
+    """Primeira mensagem de um contato novo (`contato["criado_agora"]`): se o
+    cliente tem Kommo e existe um lead com este telefone, já marca a tag
+    IA ATIVA agora — sem isso, a regra "nenhuma das duas tags" de
+    `_lead_permite_ia` travaria um lead que nunca teve chance de ser
+    marcado. Nunca mexe num lead que já tem IA ATIVA ou LQIA (não
+    sobrescreve decisão já tomada antes mesmo da primeira mensagem — ex:
+    lead que já chegou marcado como transferido). Best-effort: falha aqui
+    vira log, nunca impede a primeira mensagem de ser processada."""
+    credenciais = db.obter_credenciais_kommo(cliente["id"])
+    if not credenciais:
+        return
+    dominio = credenciais.get("kommo_domain", "")
+    token = credenciais.get("access_token", "")
+    if not dominio or not token:
+        return
+    try:
+        bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, contato["id_whatsapp"])
+        if bruto.startswith("erro"):
+            return
+        lead = json.loads(bruto)
+        if not lead.get("encontrado"):
+            return
+        tags = lead.get("tags", [])
+        if TAG_IA_ATIVA in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
+            return
+        resultado = kommo_cartao.adicionar_tag(
+            dominio, token, str(lead["id"]), TAG_IA_ATIVA, ", ".join(tags))
+        if resultado.startswith("erro"):
+            raise RuntimeError(resultado)
+    except Exception as e:  # noqa: BLE001 — provisionar é bônus, não trava a 1a mensagem
+        db.registrar_log(cliente["id"], "erro",
+                         f"[worker] falha ao provisionar tag IA ATIVA no Kommo: {e}")
 
-    Fail-open em qualquer caso que não seja "achei o lead e ele não tem a
-    tag": sem Kommo cadastrado, sem credencial completa, lead não encontrado
-    por telefone, ou erro de rede/Kommo — a IA responde normalmente. Só um
-    lead encontrado E sem a tag barra a resposta. Isso evita quebrar cliente
-    nenhum que não usa essa convenção de tag."""
+
+def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
+    """Decide, pelas tags do Kommo, se a IA pode responder este contato agora.
+
+    - sem Kommo cadastrado, sem credencial completa, lead não encontrado por
+      telefone, ou erro de rede/Kommo: responde normal — nada pra travar.
+    - lead com a tag de transferência (LQIA — mesma do handoff manual, pode
+      ter sido adicionada pelo agente ou direto no Kommo): não responde.
+    - lead com IA ATIVA e sem LQIA: responde.
+    - lead sem NENHUMA das duas: não responde. É o estado de "ainda não foi
+      decidido" (tag removida manualmente sem marcar LQIA, ou lead de antes
+      desta tag existir) — `_provisionar_tag_ia_ativa` cobre o caso normal
+      (contato novo), então chegar aqui sem nenhuma tag é a exceção, e o
+      seguro é calar, não assumir que pode responder."""
     credenciais = db.obter_credenciais_kommo(cliente["id"])
     if not credenciais:
         return True
@@ -269,6 +310,8 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         db.registrar_log(cliente["id"], "erro",
                          f"[worker] falha ao checar tag de ativação no Kommo: {e}")
         return True
+    if TAG_TRANSFERIDO_ATENDENTE in tags:
+        return False
     return TAG_IA_ATIVA in tags
 
 
@@ -871,6 +914,8 @@ def processar(payload: dict) -> dict:
         aviso, rotulo = SEM_ARQUIVO, f"[arquivo que não consigo abrir: {payload.get('motivo', '?')}]"
 
     contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, payload.get("nome", ""))
+    if contato["criado_agora"]:
+        _provisionar_tag_ia_ativa(cliente, contato)
 
     # Reset vem ANTES de tudo: funciona mesmo com o agente desligado ou com o
     # contato em atendimento humano, que é justamente quando alguém quer

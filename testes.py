@@ -1125,19 +1125,130 @@ def teste_lead_permite_ia_com_tag_responde():
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
 
 
-def teste_lead_permite_ia_sem_tag_barra():
-    """Único caso que realmente cala a IA: lead achado e sem a tag."""
+def teste_lead_permite_ia_com_tag_lqia_barra():
+    """Lead com a tag de transferência não responde, mesmo tendo IA ATIVA
+    também (LQIA manda mais — foi passado pra humano)."""
     import worker_agente as w
     import db
     import kommo_cartao
     originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     kommo_cartao.buscar_lead_por_telefone = lambda *a: (
-        '{"encontrado": true, "id": 7, "tags": ["vip", "LQIA"]}')
+        '{"encontrado": true, "id": 7, "tags": ["vip", "IA ATIVA", "LQIA"]}')
     try:
         assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is False
     finally:
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+
+
+def teste_lead_permite_ia_sem_nenhuma_tag_barra():
+    """Lead achado mas sem IA ATIVA nem LQIA — estado anômalo (tag removida
+    manualmente, ou lead de antes desta funcionalidade existir). O seguro é
+    calar, não assumir que pode responder."""
+    import worker_agente as w
+    import db
+    import kommo_cartao
+    originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: (
+        '{"encontrado": true, "id": 7, "tags": ["vip"]}')
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is False
+    finally:
+        db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+
+
+def _com_kommo_dublado_pra_provisionar():
+    import db
+    import kommo_cartao
+    chamadas = []
+    originais = {
+        "credenciais": db.obter_credenciais_kommo,
+        "buscar": kommo_cartao.buscar_lead_por_telefone,
+        "tag": kommo_cartao.adicionar_tag,
+        "log": db.registrar_log,
+    }
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    db.registrar_log = lambda *a: chamadas.append(("log", a))
+    return chamadas, originais
+
+
+def _restaura_kommo_do_provisionar(originais):
+    import db
+    import kommo_cartao
+    db.obter_credenciais_kommo = originais["credenciais"]
+    kommo_cartao.buscar_lead_por_telefone = originais["buscar"]
+    kommo_cartao.adicionar_tag = originais["tag"]
+    db.registrar_log = originais["log"]
+
+
+def teste_provisionar_tag_sem_credencial_nao_chama_kommo():
+    import worker_agente as w
+    import db
+    original = db.obter_credenciais_kommo
+    db.obter_credenciais_kommo = lambda *a: None
+    try:
+        w._provisionar_tag_ia_ativa({"id": 1}, {"id_whatsapp": "5511999999999"})
+    finally:
+        db.obter_credenciais_kommo = original
+
+
+def teste_provisionar_tag_adiciona_quando_lead_sem_nenhuma_tag():
+    import worker_agente as w
+    import kommo_cartao
+    chamadas, originais = _com_kommo_dublado_pra_provisionar()
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: (
+        '{"encontrado": true, "id": 7, "tags": ["vip"]}')
+    kommo_cartao.adicionar_tag = lambda *a: (
+        chamadas.append(("tag", a)) or '{"tags_agora": ["vip", "IA ATIVA"]}')
+    try:
+        w._provisionar_tag_ia_ativa({"id": 1}, {"id_whatsapp": "5511999999999"})
+    finally:
+        _restaura_kommo_do_provisionar(originais)
+    tag = next(c[1] for c in chamadas if c[0] == "tag")
+    assert tag == ("cliente", "tok", "7", w.TAG_IA_ATIVA, "vip")
+
+
+def teste_provisionar_tag_nao_mexe_se_lead_ja_tem_ia_ativa_ou_lqia():
+    import worker_agente as w
+    import kommo_cartao
+    for tags_existentes in (["IA ATIVA"], ["LQIA"]):
+        chamadas, originais = _com_kommo_dublado_pra_provisionar()
+        kommo_cartao.buscar_lead_por_telefone = lambda *a, t=tags_existentes: (
+            json.dumps({"encontrado": True, "id": 7, "tags": t}))
+        kommo_cartao.adicionar_tag = lambda *a: chamadas.append(("tag", a))
+        try:
+            w._provisionar_tag_ia_ativa({"id": 1}, {"id_whatsapp": "5511999999999"})
+        finally:
+            _restaura_kommo_do_provisionar(originais)
+        assert not any(c[0] == "tag" for c in chamadas), tags_existentes
+
+
+def teste_provisionar_tag_sem_lead_nao_chama_adicionar_tag():
+    import worker_agente as w
+    import kommo_cartao
+    chamadas, originais = _com_kommo_dublado_pra_provisionar()
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: '{"encontrado": false}'
+    kommo_cartao.adicionar_tag = lambda *a: chamadas.append(("tag", a))
+    try:
+        w._provisionar_tag_ia_ativa({"id": 1}, {"id_whatsapp": "5511999999999"})
+    finally:
+        _restaura_kommo_do_provisionar(originais)
+    assert not any(c[0] == "tag" for c in chamadas)
+
+
+def teste_provisionar_tag_falha_vira_log_sem_levantar_excecao():
+    import worker_agente as w
+    import kommo_cartao
+    chamadas, originais = _com_kommo_dublado_pra_provisionar()
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: (
+        '{"encontrado": true, "id": 7, "tags": []}')
+    kommo_cartao.adicionar_tag = lambda *a: "erro: Kommo respondeu 429"
+    try:
+        w._provisionar_tag_ia_ativa({"id": 1}, {"id_whatsapp": "5511999999999"})
+    finally:
+        _restaura_kommo_do_provisionar(originais)
+    assert any(c[0] == "log" for c in chamadas)
 
 
 # --- QA de atendimento (qa_atendimento.py) ------------------------------
@@ -1308,7 +1419,13 @@ TESTES = [
     teste_lead_permite_ia_quando_lead_nao_encontrado,
     teste_lead_permite_ia_em_erro_do_kommo,
     teste_lead_permite_ia_com_tag_responde,
-    teste_lead_permite_ia_sem_tag_barra,
+    teste_lead_permite_ia_com_tag_lqia_barra,
+    teste_lead_permite_ia_sem_nenhuma_tag_barra,
+    teste_provisionar_tag_sem_credencial_nao_chama_kommo,
+    teste_provisionar_tag_adiciona_quando_lead_sem_nenhuma_tag,
+    teste_provisionar_tag_nao_mexe_se_lead_ja_tem_ia_ativa_ou_lqia,
+    teste_provisionar_tag_sem_lead_nao_chama_adicionar_tag,
+    teste_provisionar_tag_falha_vira_log_sem_levantar_excecao,
     teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
     teste_qa_aceita_veredito_valido,
     teste_qa_rejeita_severidade_fora_do_enum,
