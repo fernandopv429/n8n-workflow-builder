@@ -235,6 +235,42 @@ FERRAMENTA_HUMANO = {
 # (31/10/2026, a pedido do Fernando).
 TAG_TRANSFERIDO_ATENDENTE = "LQIA"
 
+# Tag que, quando o cliente tem Kommo cadastrado, precisa estar no lead pra IA
+# responder — mesmo mecanismo do node "SE LEAD TEM A TAG" do workflow
+# "Ecossistema IA - Bruno" (Premium Film), que já roda assim em produção.
+# Convenção geral, não é nome nosso (31/10/2026, a pedido do Fernando).
+TAG_IA_ATIVA = "IA ATIVA"
+
+
+def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
+    """Decide, pela tag do Kommo, se a IA pode responder este contato agora.
+
+    Fail-open em qualquer caso que não seja "achei o lead e ele não tem a
+    tag": sem Kommo cadastrado, sem credencial completa, lead não encontrado
+    por telefone, ou erro de rede/Kommo — a IA responde normalmente. Só um
+    lead encontrado E sem a tag barra a resposta. Isso evita quebrar cliente
+    nenhum que não usa essa convenção de tag."""
+    credenciais = db.obter_credenciais_kommo(cliente["id"])
+    if not credenciais:
+        return True
+    dominio = credenciais.get("kommo_domain", "")
+    token = credenciais.get("access_token", "")
+    if not dominio or not token:
+        return True
+    try:
+        bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, contato["id_whatsapp"])
+        if bruto.startswith("erro"):
+            return True
+        lead = json.loads(bruto)
+        if not lead.get("encontrado"):
+            return True
+        tags = lead.get("tags", [])
+    except Exception as e:  # noqa: BLE001 — falha na checagem nunca pode calar a IA
+        db.registrar_log(cliente["id"], "erro",
+                         f"[worker] falha ao checar tag de ativação no Kommo: {e}")
+        return True
+    return TAG_IA_ATIVA in tags
+
 
 # Ferramentas do Cartão do Lead (Kommo), nativas — 30/10/2026: antes essas 7
 # ferramentas vinham de um MCP ligado por cliente (ver mcp_cliente.py), e TODA
@@ -861,6 +897,13 @@ def processar(payload: dict) -> dict:
 
     if contato["status"] == "HUMANO":
         # atendente assumiu — a IA calada é o comportamento certo aqui
+        db.salvar_mensagem_agente(contato["id"], "user", texto)
+        return None
+
+    if not _lead_permite_ia(cliente, contato):
+        # lead existe no Kommo e não tem a tag IA_ATIVA — mesma trava do
+        # workflow do Bruno: grava a mensagem e não responde, sem precisar
+        # mudar o status do contato (não é handoff, é "nunca foi ativado").
         db.salvar_mensagem_agente(contato["id"], "user", texto)
         return None
 

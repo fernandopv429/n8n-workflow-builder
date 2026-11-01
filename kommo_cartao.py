@@ -200,3 +200,22 @@ def criar_tarefa(kommo_domain: str, access_token: str, lead_id: str,
     }]
     d = _chamar(kommo_domain, access_token, "POST", "/api/v4/tasks", corpo)
     return json.dumps(d, ensure_ascii=False)
+
+
+@_legivel
+def buscar_lead_por_telefone(kommo_domain: str, access_token: str, telefone: str) -> str:
+    """Busca o lead cujo contato tem este telefone — usa a busca por texto
+    livre da API do Kommo (`?query=`), então o número vai só com dígitos,
+    sem +, espaço ou traço. Devolve o PRIMEIRO resultado (um telefone raras
+    vezes bate em mais de um lead). {"encontrado": false} se não achar
+    nenhum — não cria lead nenhum, só procura."""
+    numero = "".join(ch for ch in telefone if ch.isdigit())
+    d = _chamar(kommo_domain, access_token, "GET",
+                f"/api/v4/leads?query={urllib.parse.quote(numero)}&with=contacts")
+    leads = (d.get("_embedded") or {}).get("leads") or []
+    if not leads:
+        return json.dumps({"encontrado": False}, ensure_ascii=False)
+    lead = leads[0]
+    return json.dumps({
+        "encontrado": True, "id": lead.get("id"), "tags": _tags_do_lead(lead),
+    }, ensure_ascii=False)

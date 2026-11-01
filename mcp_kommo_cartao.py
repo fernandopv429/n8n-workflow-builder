@@ -1,6 +1,6 @@
 """MCP do Cartão do Lead (Kommo) — servidor local.
 
-Casca fina sobre `kommo_cartao.py`: a lógica de verdade (as 7 ferramentas,
+Casca fina sobre `kommo_cartao.py`: a lógica de verdade (as 8 ferramentas,
 chamada HTTP pro Kommo) mora lá, sem nenhuma dependência de MCP — é o que
 permite `worker_agente.py` chamar essas mesmas funções direto, em processo,
 sem abrir sessão MCP nenhuma (30/10/2026: é a maioria do tráfego de
@@ -64,7 +64,7 @@ servidor = MCPServer(
     ),
 )
 
-# As 7 ferramentas vêm prontas de kommo_cartao.py (lógica + @_legivel já
+# As 8 ferramentas vêm prontas de kommo_cartao.py (lógica + @_legivel já
 # aplicado) — aqui só registramos cada uma no servidor MCP, sem reescrever
 # nada. `servidor.tool()` preserva nome/docstring/assinatura da função
 # original, então a descrição que o modelo vê continua a mesma.
@@ -75,6 +75,7 @@ adicionar_tag = servidor.tool()(kommo_cartao.adicionar_tag)
 remover_tag = servidor.tool()(kommo_cartao.remover_tag)
 adicionar_nota = servidor.tool()(kommo_cartao.adicionar_nota)
 criar_tarefa = servidor.tool()(kommo_cartao.criar_tarefa)
+buscar_lead_por_telefone = servidor.tool()(kommo_cartao.buscar_lead_por_telefone)
 
 # Compatibilidade com quem importava utilitário daqui (ex: testes.py).
 juntar_tags = kommo_cartao.juntar_tags

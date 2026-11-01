@@ -1066,6 +1066,80 @@ def teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff():
     assert tipos.count("log") == 2, "tem que logar o handoff E o erro da tag"
 
 
+# --- tag IA ATIVA: gating do agente pelo Kommo (31/10/2026) ---------------
+
+def teste_lead_permite_ia_sem_credencial_kommo():
+    """Cliente sem Kommo cadastrado nunca pode ser calado por uma tag que
+    ele nem tem como ter — fail-open."""
+    import worker_agente as w
+    import db
+    original = db.obter_credenciais_kommo
+    db.obter_credenciais_kommo = lambda *a: None
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
+    finally:
+        db.obter_credenciais_kommo = original
+
+
+def teste_lead_permite_ia_quando_lead_nao_encontrado():
+    """Sem lead achado por telefone (funil que não usa a tag, ou lead ainda
+    não existe) não pode travar o atendimento — fail-open."""
+    import worker_agente as w
+    import db
+    import kommo_cartao
+    originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: '{"encontrado": false}'
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
+    finally:
+        db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+
+
+def teste_lead_permite_ia_em_erro_do_kommo():
+    """Erro de rede/Kommo também é fail-open — nunca pode ser o motivo de
+    um cliente real ficar sem resposta."""
+    import worker_agente as w
+    import db
+    import kommo_cartao
+    originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: "erro: Kommo respondeu 500"
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
+    finally:
+        db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+
+
+def teste_lead_permite_ia_com_tag_responde():
+    import worker_agente as w
+    import db
+    import kommo_cartao
+    originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: (
+        '{"encontrado": true, "id": 7, "tags": ["vip", "IA ATIVA"]}')
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
+    finally:
+        db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+
+
+def teste_lead_permite_ia_sem_tag_barra():
+    """Único caso que realmente cala a IA: lead achado e sem a tag."""
+    import worker_agente as w
+    import db
+    import kommo_cartao
+    originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: (
+        '{"encontrado": true, "id": 7, "tags": ["vip", "LQIA"]}')
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is False
+    finally:
+        db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+
+
 # --- QA de atendimento (qa_atendimento.py) ------------------------------
 # O prompt do juiz tem um exemplo de JSON literal no meio do template —
 # achado ao escrever o módulo (30/10/2026): `str.format()` tenta resolver
@@ -1230,6 +1304,11 @@ TESTES = [
     teste_chamar_humano_grava_evento_e_nao_mexe_no_kommo_sem_lead_id,
     teste_chamar_humano_marca_tag_quando_tem_lead_id_e_credencial,
     teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff,
+    teste_lead_permite_ia_sem_credencial_kommo,
+    teste_lead_permite_ia_quando_lead_nao_encontrado,
+    teste_lead_permite_ia_em_erro_do_kommo,
+    teste_lead_permite_ia_com_tag_responde,
+    teste_lead_permite_ia_sem_tag_barra,
     teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
     teste_qa_aceita_veredito_valido,
     teste_qa_rejeita_severidade_fora_do_enum,
