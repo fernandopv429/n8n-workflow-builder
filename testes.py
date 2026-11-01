@@ -927,6 +927,47 @@ def teste_kommo_cartao_nao_depende_de_mcp():
     assert callable(k.mover_lead)
 
 
+def teste_telefone_e_tags_do_lead_busca_contato_vinculado():
+    """Lead vem sem telefone (mora no contato) — a função tem que seguir pro
+    contato vinculado (primeiro de `_embedded.contacts`) pra achar o PHONE,
+    e devolver junto as tags que já estavam no lead."""
+    import kommo_cartao as k
+    chamadas = []
+    original = k._chamar
+    def falso(dominio, token, metodo, caminho):
+        chamadas.append(caminho)
+        if caminho.startswith("/api/v4/leads/"):
+            return {
+                "_embedded": {
+                    "tags": [{"name": "vip"}],
+                    "contacts": [{"id": 18815296}],
+                },
+            }
+        assert caminho == "/api/v4/contacts/18815296"
+        return {"custom_fields_values": [
+            {"field_code": "PHONE", "values": [{"value": "+5511942029143"}]},
+        ]}
+    k._chamar = falso
+    try:
+        r = k.telefone_e_tags_do_lead("cliente", "tok", "28603587")
+    finally:
+        k._chamar = original
+    info = json.loads(r)
+    assert info == {"telefone": "5511942029143", "tags": ["vip"]}
+    assert chamadas == ["/api/v4/leads/28603587?with=contacts", "/api/v4/contacts/18815296"]
+
+
+def teste_telefone_e_tags_do_lead_sem_contato_devolve_telefone_vazio():
+    import kommo_cartao as k
+    original = k._chamar
+    k._chamar = lambda *a: {"_embedded": {"tags": []}}
+    try:
+        r = k.telefone_e_tags_do_lead("cliente", "tok", "1")
+    finally:
+        k._chamar = original
+    assert json.loads(r) == {"telefone": "", "tags": []}
+
+
 def teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao():
     """O schema que o worker mostra pro modelo (FERRAMENTAS_KOMMO_CARTAO) tem
     que pedir exatamente os parâmetros que `kommo_cartao.py` espera — menos
@@ -1081,6 +1122,24 @@ def teste_lead_permite_ia_sem_credencial_kommo():
         db.obter_credenciais_kommo = original
 
 
+def _sem_cache_local_de_lead():
+    """`_lead_permite_ia`/`_provisionar_tag_ia_ativa` consultam `kommo_leads`
+    (espelho local alimentado pelo webhook) antes de qualquer busca ao vivo —
+    dublado sempre como "nunca tem cache" pra exercitar o caminho de busca,
+    que é o que estes testes querem. `salvar_lead_kommo` vira no-op: sem
+    banco de verdade neste sandbox."""
+    import db
+    originais = (db.obter_lead_kommo, db.salvar_lead_kommo)
+    db.obter_lead_kommo = lambda *a: None
+    db.salvar_lead_kommo = lambda *a: None
+    return originais
+
+
+def _restaura_cache_local_de_lead(originais):
+    import db
+    db.obter_lead_kommo, db.salvar_lead_kommo = originais
+
+
 def teste_lead_permite_ia_quando_lead_nao_encontrado():
     """Sem lead achado por telefone (funil que não usa a tag, ou lead ainda
     não existe) não pode travar o atendimento — fail-open."""
@@ -1088,12 +1147,14 @@ def teste_lead_permite_ia_quando_lead_nao_encontrado():
     import db
     import kommo_cartao
     originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    originais_cache = _sem_cache_local_de_lead()
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     kommo_cartao.buscar_lead_por_telefone = lambda *a: '{"encontrado": false}'
     try:
         assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
     finally:
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+        _restaura_cache_local_de_lead(originais_cache)
 
 
 def teste_lead_permite_ia_em_erro_do_kommo():
@@ -1103,12 +1164,14 @@ def teste_lead_permite_ia_em_erro_do_kommo():
     import db
     import kommo_cartao
     originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    originais_cache = _sem_cache_local_de_lead()
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     kommo_cartao.buscar_lead_por_telefone = lambda *a: "erro: Kommo respondeu 500"
     try:
         assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
     finally:
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+        _restaura_cache_local_de_lead(originais_cache)
 
 
 def teste_lead_permite_ia_com_tag_responde():
@@ -1116,6 +1179,7 @@ def teste_lead_permite_ia_com_tag_responde():
     import db
     import kommo_cartao
     originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    originais_cache = _sem_cache_local_de_lead()
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     kommo_cartao.buscar_lead_por_telefone = lambda *a: (
         '{"encontrado": true, "id": 7, "tags": ["vip", "IA ATIVA"]}')
@@ -1123,6 +1187,7 @@ def teste_lead_permite_ia_com_tag_responde():
         assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
     finally:
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+        _restaura_cache_local_de_lead(originais_cache)
 
 
 def teste_lead_permite_ia_com_tag_lqia_barra():
@@ -1132,6 +1197,7 @@ def teste_lead_permite_ia_com_tag_lqia_barra():
     import db
     import kommo_cartao
     originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    originais_cache = _sem_cache_local_de_lead()
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     kommo_cartao.buscar_lead_por_telefone = lambda *a: (
         '{"encontrado": true, "id": 7, "tags": ["vip", "IA ATIVA", "LQIA"]}')
@@ -1139,6 +1205,7 @@ def teste_lead_permite_ia_com_tag_lqia_barra():
         assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is False
     finally:
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+        _restaura_cache_local_de_lead(originais_cache)
 
 
 def teste_lead_permite_ia_sem_nenhuma_tag_barra():
@@ -1149,6 +1216,7 @@ def teste_lead_permite_ia_sem_nenhuma_tag_barra():
     import db
     import kommo_cartao
     originais = (db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone)
+    originais_cache = _sem_cache_local_de_lead()
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     kommo_cartao.buscar_lead_por_telefone = lambda *a: (
         '{"encontrado": true, "id": 7, "tags": ["vip"]}')
@@ -1156,6 +1224,26 @@ def teste_lead_permite_ia_sem_nenhuma_tag_barra():
         assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is False
     finally:
         db.obter_credenciais_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+        _restaura_cache_local_de_lead(originais_cache)
+
+
+def teste_lead_permite_ia_usa_cache_local_sem_chamar_o_kommo():
+    """Com registro em `kommo_leads`, nem busca ao vivo — é o ponto inteiro
+    do webhook: gating 100% local quando o lead já foi visto antes."""
+    import worker_agente as w
+    import db
+    import kommo_cartao
+    chamou_busca = []
+    originais = (db.obter_credenciais_kommo, db.obter_lead_kommo,
+                kommo_cartao.buscar_lead_por_telefone)
+    db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
+    db.obter_lead_kommo = lambda *a: {"id": 7, "tags": ["IA ATIVA"]}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: chamou_busca.append(a) or '{"encontrado": false}'
+    try:
+        assert w._lead_permite_ia({"id": 1}, {"id_whatsapp": "5511999999999"}) is True
+    finally:
+        db.obter_credenciais_kommo, db.obter_lead_kommo, kommo_cartao.buscar_lead_por_telefone = originais
+    assert not chamou_busca, "não devia ter chamado busca ao vivo com cache local presente"
 
 
 def _com_kommo_dublado_pra_provisionar():
@@ -1167,9 +1255,13 @@ def _com_kommo_dublado_pra_provisionar():
         "buscar": kommo_cartao.buscar_lead_por_telefone,
         "tag": kommo_cartao.adicionar_tag,
         "log": db.registrar_log,
+        "obter_lead": db.obter_lead_kommo,
+        "salvar_lead": db.salvar_lead_kommo,
     }
     db.obter_credenciais_kommo = lambda *a: {"kommo_domain": "cliente", "access_token": "tok"}
     db.registrar_log = lambda *a: chamadas.append(("log", a))
+    db.obter_lead_kommo = lambda *a: None
+    db.salvar_lead_kommo = lambda *a: chamadas.append(("salvar_lead", a))
     return chamadas, originais
 
 
@@ -1180,6 +1272,8 @@ def _restaura_kommo_do_provisionar(originais):
     kommo_cartao.buscar_lead_por_telefone = originais["buscar"]
     kommo_cartao.adicionar_tag = originais["tag"]
     db.registrar_log = originais["log"]
+    db.obter_lead_kommo = originais["obter_lead"]
+    db.salvar_lead_kommo = originais["salvar_lead"]
 
 
 def teste_provisionar_tag_sem_credencial_nao_chama_kommo():
@@ -1409,6 +1503,8 @@ TESTES = [
     teste_erro_da_openai_carrega_o_corpo,
     teste_reset_so_dispara_em_comando_exato,
     teste_kommo_cartao_nao_depende_de_mcp,
+    teste_telefone_e_tags_do_lead_busca_contato_vinculado,
+    teste_telefone_e_tags_do_lead_sem_contato_devolve_telefone_vazio,
     teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao,
     teste_executar_kommo_cartao_ignora_credencial_do_modelo,
     teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo,
@@ -1421,6 +1517,7 @@ TESTES = [
     teste_lead_permite_ia_com_tag_responde,
     teste_lead_permite_ia_com_tag_lqia_barra,
     teste_lead_permite_ia_sem_nenhuma_tag_barra,
+    teste_lead_permite_ia_usa_cache_local_sem_chamar_o_kommo,
     teste_provisionar_tag_sem_credencial_nao_chama_kommo,
     teste_provisionar_tag_adiciona_quando_lead_sem_nenhuma_tag,
     teste_provisionar_tag_nao_mexe_se_lead_ja_tem_ia_ativa_ou_lqia,

@@ -77,6 +77,7 @@ adicionar_nota = servidor.tool()(kommo_cartao.adicionar_nota)
 criar_tarefa = servidor.tool()(kommo_cartao.criar_tarefa)
 buscar_lead_por_telefone = servidor.tool()(kommo_cartao.buscar_lead_por_telefone)
 consultar_contato = servidor.tool()(kommo_cartao.consultar_contato)
+telefone_e_tags_do_lead = servidor.tool()(kommo_cartao.telefone_e_tags_do_lead)
 
 # Compatibilidade com quem importava utilitário daqui (ex: testes.py).
 juntar_tags = kommo_cartao.juntar_tags

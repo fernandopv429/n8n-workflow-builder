@@ -36,6 +36,7 @@ import os
 import pathlib
 import re
 import sys
+import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -48,6 +49,7 @@ import agente_geral  # noqa: E402
 import db  # noqa: E402
 import kommo_cartao  # noqa: E402
 import mcp_cliente  # noqa: E402
+import worker_agente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import monitor_fila  # noqa: E402
 import openai_admin  # noqa: E402
@@ -117,6 +119,10 @@ ROTA_CLIENTE_ATENDIMENTO_RELATORIO = re.compile(r"^/clientes/(\d+)/atendimento-r
 ROTA_CLIENTE_KOMMO_TELEFONE = re.compile(r"^/clientes/(\d+)/kommo/telefone/([\d+ ()-]+)$")
 ROTA_CLIENTE_KOMMO_LEAD = re.compile(r"^/clientes/(\d+)/kommo/lead/(\d+)$")
 ROTA_CLIENTE_KOMMO_CONTATO = re.compile(r"^/clientes/(\d+)/kommo/contato/(\d+)$")
+ROTA_CLIENTE_KOMMO_WEBHOOK = re.compile(r"^/clientes/(\d+)/kommo/webhook$")
+# Recebedor do webhook do Kommo — NÃO passa pela autenticação Basic normal
+# (o Kommo não manda essas credenciais); o token no path é a autenticação.
+ROTA_WEBHOOK_KOMMO = re.compile(r"^/webhooks/kommo/(\d+)/([A-Za-z0-9_-]+)$")
 ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
 # Visão agregada de todos os clientes — quantas vezes cada ferramenta é
 # chamada, quanto demora, quanto falha (ver metricas.py). `/metricas/<dias>`
@@ -188,6 +194,58 @@ class Handler(BaseHTTPRequestHandler):
         tamanho = int(self.headers.get("Content-Length", 0))
         bruto = self.rfile.read(tamanho) if tamanho else b"{}"
         return json.loads(bruto)
+
+    def _webhook_kommo(self, cliente_id: int, token: str):
+        """Recebe o evento "lead criado" do Kommo (form-urlencoded, não
+        JSON — é assim que o Kommo manda webhook). Responde 200 na hora,
+        antes de processar: o Kommo espera resposta rápida e reenvia em
+        retry se não receber — processar primeiro e responder depois
+        arriscaria o Kommo achar que falhou e mandar de novo o que já deu
+        certo."""
+        tamanho = int(self.headers.get("Content-Length", 0))
+        bruto = self.rfile.read(tamanho) if tamanho else b""
+        self._responder_json(200, {"ok": True})
+
+        if not db.webhook_kommo_token_confere(cliente_id, token):
+            return
+        credenciais = db.obter_credenciais_kommo(cliente_id)
+        if not credenciais:
+            return
+
+        campos = urllib.parse.parse_qs(bruto.decode("utf-8", "replace"))
+        ids_lead = sorted({
+            v[0] for k, v in campos.items()
+            if re.match(r"^leads\[add\]\[\d+\]\[id\]$", k) and v
+        })
+        for lead_id in ids_lead:
+            try:
+                bruto_info = kommo_cartao.telefone_e_tags_do_lead(
+                    credenciais["kommo_domain"], credenciais["access_token"], lead_id)
+                if bruto_info.startswith("erro"):
+                    raise RuntimeError(bruto_info)
+                info = json.loads(bruto_info)
+                telefone, tags = info.get("telefone", ""), info.get("tags", [])
+                if not telefone:
+                    db.registrar_log(cliente_id, "sistema",
+                                     f"[webhook kommo] lead {lead_id} novo sem telefone "
+                                     "cadastrado no contato — não dá pra ligar a um "
+                                     "contato do WhatsApp.")
+                    continue
+                if (worker_agente.TAG_IA_ATIVA not in tags
+                        and worker_agente.TAG_TRANSFERIDO_ATENDENTE not in tags):
+                    resultado = kommo_cartao.adicionar_tag(
+                        credenciais["kommo_domain"], credenciais["access_token"],
+                        lead_id, worker_agente.TAG_IA_ATIVA, ", ".join(tags))
+                    if resultado.startswith("erro"):
+                        raise RuntimeError(resultado)
+                    tags = tags + [worker_agente.TAG_IA_ATIVA]
+                db.salvar_lead_kommo(cliente_id, telefone, int(lead_id), tags)
+                db.registrar_log(cliente_id, "sistema",
+                                 f"[webhook kommo] lead {lead_id} novo: telefone {telefone}, "
+                                 f"tags {tags or '-'}.")
+            except Exception as e:  # noqa: BLE001 — um lead falhando não pode travar os outros
+                db.registrar_log(cliente_id, "erro",
+                                 f"[webhook kommo] falha ao processar lead {lead_id}: {e}")
 
     # --- autenticação -------------------------------------------------
 
@@ -514,6 +572,11 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST --------------------------------------------------------
 
     def do_POST(self):
+        m = ROTA_WEBHOOK_KOMMO.match(self.path)
+        if m:
+            self._webhook_kommo(int(m.group(1)), m.group(2))
+            return
+
         if not self._autenticado():
             return
 
@@ -793,6 +856,35 @@ class Handler(BaseHTTPRequestHandler):
             db.registrar_log(cliente_id, "sistema",
                              "Prompt restaurado pra versão anterior, pelo painel.")
             self._responder_json(200, {"restaurado": True})
+            return
+
+        m = ROTA_CLIENTE_KOMMO_WEBHOOK.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if not credenciais:
+                self._responder_json(400, {"error": "cliente sem Kommo cadastrado"})
+                return
+            base_painel = carregar_env().get("PAINEL_URL", "").rstrip("/")
+            if not base_painel:
+                self._responder_json(400, {
+                    "error": "PAINEL_URL não configurada — é a URL pública deste "
+                             "painel, pro Kommo saber onde mandar o webhook."})
+                return
+            token = db.obter_ou_criar_webhook_token_kommo(cliente_id)
+            destino = f"{base_painel}/webhooks/kommo/{cliente_id}/{token}"
+            try:
+                resposta = kommo_cartao._chamar(  # noqa: SLF001 — registro é infra, não ferramenta do agente
+                    credenciais["kommo_domain"], credenciais["access_token"], "POST",
+                    "/api/v4/webhooks", {"destination": destino, "settings": ["add_lead"]})
+            except RuntimeError as e:
+                db.registrar_log(cliente_id, "erro", f"Falha ao registrar webhook do Kommo: {e}")
+                self._responder_json(502, {"error": str(e)})
+                return
+            db.registrar_log(cliente_id, "sistema",
+                             f"Webhook do Kommo registrado (lead criado) -> {destino}")
+            self._responder_json(200, {"registrado": True, "destino": destino,
+                                       "resposta": resposta})
             return
 
         m = ROTA_CLIENTE_QA_RODAR.match(self.path)

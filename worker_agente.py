@@ -251,7 +251,13 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
     marcado. Nunca mexe num lead que já tem IA ATIVA ou LQIA (não
     sobrescreve decisão já tomada antes mesmo da primeira mensagem — ex:
     lead que já chegou marcado como transferido). Best-effort: falha aqui
-    vira log, nunca impede a primeira mensagem de ser processada."""
+    vira log, nunca impede a primeira mensagem de ser processada.
+
+    Se o webhook do Kommo (lead criado -> servidor.py:_webhook_kommo) já
+    cuidou deste telefone, nem busca de novo — é exatamente pra isso que
+    `kommo_leads` existe: achar o lead por busca ao vivo (telefone no
+    contato, não no lead — ver kommo_cartao.buscar_lead_por_telefone) é
+    lento e já se mostrou frágil (01/11/2026)."""
     credenciais = db.obter_credenciais_kommo(cliente["id"])
     if not credenciais:
         return
@@ -260,6 +266,8 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
     if not dominio or not token:
         return
     tel = contato["id_whatsapp"]
+    if db.obter_lead_kommo(cliente["id"], tel) is not None:
+        return  # webhook já processou este telefone quando o lead nasceu
     try:
         bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, tel)
         if bruto.startswith("erro"):
@@ -279,6 +287,7 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
             return
         tags = lead.get("tags", [])
         if TAG_IA_ATIVA in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
+            db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags)
             db.registrar_log(cliente["id"], "sistema",
                              f"[worker] contato novo {tel}: lead {lead.get('id')} já tinha "
                              f"tag ({', '.join(tags) or '-'}), não mexi.")
@@ -287,6 +296,8 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
             dominio, token, str(lead["id"]), TAG_IA_ATIVA, ", ".join(tags))
         if resultado.startswith("erro"):
             raise RuntimeError(resultado)
+        tags_agora = json.loads(resultado).get("tags_agora", tags + [TAG_IA_ATIVA])
+        db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags_agora)
         db.registrar_log(cliente["id"], "sistema",
                          f"[worker] contato novo {tel}: tag IA ATIVA adicionada ao "
                          f"lead {lead.get('id')} no Kommo.")
@@ -307,7 +318,13 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
       decidido" (tag removida manualmente sem marcar LQIA, ou lead de antes
       desta tag existir) — `_provisionar_tag_ia_ativa` cobre o caso normal
       (contato novo), então chegar aqui sem nenhuma tag é a exceção, e o
-      seguro é calar, não assumir que pode responder."""
+      seguro é calar, não assumir que pode responder.
+
+    Primeiro olha `kommo_leads` (espelho local, alimentado pelo webhook do
+    Kommo — ver servidor.py:_webhook_kommo): se o telefone já está lá, nem
+    chama o Kommo, é leitura local. Só cai pra busca ao vivo
+    (`kommo_cartao.buscar_lead_por_telefone`) se não tiver registro — lead
+    criado antes do webhook existir, ou cliente sem webhook configurado."""
     credenciais = db.obter_credenciais_kommo(cliente["id"])
     if not credenciais:
         return True
@@ -315,6 +332,12 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
     token = credenciais.get("access_token", "")
     if not dominio or not token:
         return True
+    lead_local = db.obter_lead_kommo(cliente["id"], contato["id_whatsapp"])
+    if lead_local is not None:
+        tags = lead_local["tags"]
+        if TAG_TRANSFERIDO_ATENDENTE in tags:
+            return False
+        return TAG_IA_ATIVA in tags
     try:
         bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, contato["id_whatsapp"])
         if bruto.startswith("erro"):
@@ -323,6 +346,9 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         if not lead.get("encontrado"):
             return True
         tags = lead.get("tags", [])
+        # Cacheia pra próxima mensagem não precisar buscar ao vivo de novo —
+        # mesma função que o webhook usa pra alimentar `kommo_leads`.
+        db.salvar_lead_kommo(cliente["id"], contato["id_whatsapp"], lead["id"], tags)
     except Exception as e:  # noqa: BLE001 — falha na checagem nunca pode calar a IA
         db.registrar_log(cliente["id"], "erro",
                          f"[worker] falha ao checar tag de ativação no Kommo: {e}")

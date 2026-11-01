@@ -234,6 +234,31 @@ def buscar_lead_por_telefone(kommo_domain: str, access_token: str, telefone: str
 
 
 @_legivel
+def telefone_e_tags_do_lead(kommo_domain: str, access_token: str, lead_id: str) -> str:
+    """A partir só do lead_id (é o que o webhook de "lead criado" do Kommo
+    traz), acha o telefone do contato principal e as tags do lead — dois
+    GETs, porque telefone mora no contato e tags moram no lead, e não tem
+    rota que traga os dois juntos (mesmo problema de `buscar_lead_por_telefone`,
+    só que ao contrário). `telefone` vem vazio se o lead não tiver contato
+    vinculado, ou o contato não tiver telefone cadastrado."""
+    lead = _chamar(kommo_domain, access_token, "GET",
+                   f"/api/v4/leads/{urllib.parse.quote(str(lead_id))}?with=contacts")
+    contatos = (lead.get("_embedded") or {}).get("contacts") or []
+    telefone = ""
+    if contatos:
+        contato = _chamar(kommo_domain, access_token, "GET",
+                          f"/api/v4/contacts/{contatos[0]['id']}")
+        for campo in (contato.get("custom_fields_values") or []):
+            if campo.get("field_code") == "PHONE":
+                valores = campo.get("values") or []
+                if valores:
+                    telefone = "".join(
+                        ch for ch in str(valores[0].get("value", "")) if ch.isdigit())
+                    break
+    return json.dumps({"telefone": telefone, "tags": _tags_do_lead(lead)}, ensure_ascii=False)
+
+
+@_legivel
 def consultar_contato(kommo_domain: str, access_token: str, contato_id: str) -> str:
     """Consulta um CONTATO do Kommo direto (não o lead) — é onde o telefone
     de verdade mora, em `custom_fields_values`. Diagnóstico: `?with=contacts`

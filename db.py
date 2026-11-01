@@ -350,6 +350,26 @@ def garantir_schema():
             "CREATE INDEX IF NOT EXISTS idx_eventos_atendimento_contato "
             "ON eventos_atendimento (contato_id, criado_em)"
         )
+        # Webhook do Kommo (01/11/2026): a busca de lead por telefone ao vivo
+        # (contato -> lead) funciona, mas só na hora que a mensagem chega —
+        # se o lead for criado DEPOIS da primeira mensagem, ou a busca falhar
+        # por qualquer instabilidade do Kommo, a IA ATIVA nunca é marcada.
+        # Com o Kommo chamando nosso webhook assim que um lead nasce, a gente
+        # marca a tag e guarda telefone+tags aqui — gating na hora de
+        # responder fica uma leitura local, sem depender do Kommo estar no
+        # ar. Token por cliente: só quem conhece o token deste cliente
+        # consegue simular "lead novo" pra ele (ver servidor.py).
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS kommo_webhook_token TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kommo_leads (
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                telefone TEXT NOT NULL,
+                lead_id BIGINT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '',
+                atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (cliente_id, telefone)
+            )
+        """)
 
 
 # --- estado do agente de atendimento ------------------------------------
@@ -800,7 +820,7 @@ def criar_cliente_rascunho(cliente_nome: str) -> int:
 # `GET /clientes/<id>`. O token do Kommo e a chave da OpenAI ficam cifrados no
 # banco e só são lidos pelas funções próprias (obter_credenciais_kommo,
 # obter_chave_openai_cliente), nunca pela leitura genérica.
-COLUNAS_SECRETAS = ("kommo_token_cifrado", "openai_api_key_cifrada")
+COLUNAS_SECRETAS = ("kommo_token_cifrado", "openai_api_key_cifrada", "kommo_webhook_token")
 
 
 def _linha_para_cliente(cursor, r) -> dict:
@@ -1206,6 +1226,69 @@ def definir_credenciais_kommo(cliente_id: int, subdominio: str, token: str):
             "atualizado_em = now() WHERE id = %s",
             (subdominio, cifrado, cliente_id),
         )
+
+
+def obter_ou_criar_webhook_token_kommo(cliente_id: int) -> str:
+    """Token que autentica o webhook do Kommo pra este cliente (ver
+    servidor.py: POST /webhooks/kommo/<cliente_id>/<token>). Gera na primeira
+    vez que alguém registra o webhook; depois disso sempre devolve o mesmo —
+    reemitir trocaria a URL e invalidaria o webhook já cadastrado no Kommo."""
+    import secrets
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT kommo_webhook_token FROM clientes WHERE id = %s", (cliente_id,)
+        ).fetchone()
+        if linha and linha[0]:
+            return linha[0]
+        token = secrets.token_urlsafe(24)
+        conn.execute(
+            "UPDATE clientes SET kommo_webhook_token = %s WHERE id = %s",
+            (token, cliente_id),
+        )
+    return token
+
+
+def webhook_kommo_token_confere(cliente_id: int, token: str) -> bool:
+    """Confere o token do path contra o guardado — usado pelo recebedor do
+    webhook, que não passa pela autenticação Basic normal (o Kommo não manda
+    essas credenciais). Consulta a coluna direto (não por `obter_cliente`,
+    que filtra `kommo_webhook_token` de COLUNAS_SECRETAS antes de devolver)."""
+    import hmac
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT kommo_webhook_token FROM clientes WHERE id = %s", (cliente_id,)
+        ).fetchone()
+    return bool(linha and linha[0] and hmac.compare_digest(linha[0], token))
+
+
+def salvar_lead_kommo(cliente_id: int, telefone: str, lead_id: int, tags: list):
+    """Upsert do estado do lead (telefone -> lead_id + tags), espelhado do
+    Kommo via webhook. `telefone` sempre só dígitos, pra bater exatamente com
+    `contato["id_whatsapp"]` na hora do gating (ver worker_agente.py)."""
+    with _conectar() as conn:
+        conn.execute(
+            """
+            INSERT INTO kommo_leads (cliente_id, telefone, lead_id, tags, atualizado_em)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (cliente_id, telefone) DO UPDATE
+                SET lead_id = EXCLUDED.lead_id, tags = EXCLUDED.tags, atualizado_em = now()
+            """,
+            (cliente_id, telefone, lead_id, ", ".join(tags)),
+        )
+
+
+def obter_lead_kommo(cliente_id: int, telefone: str) -> dict | None:
+    """Estado do lead guardado localmente pro telefone, ou None se nunca veio
+    um webhook de criação pra ele — quem chama cai de volta pra busca ao
+    vivo nesse caso (ver worker_agente.py)."""
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT lead_id, tags FROM kommo_leads WHERE cliente_id = %s AND telefone = %s",
+            (cliente_id, telefone),
+        ).fetchone()
+    if not linha:
+        return None
+    return {"id": linha[0], "tags": [t.strip() for t in linha[1].split(",") if t.strip()]}
 
 
 def obter_credenciais_kommo(cliente_id: int) -> dict:
