@@ -46,6 +46,7 @@ sys.path.insert(0, str(RAIZ))
 import agente_chat  # noqa: E402
 import agente_geral  # noqa: E402
 import db  # noqa: E402
+import kommo_cartao  # noqa: E402
 import mcp_cliente  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import monitor_fila  # noqa: E402
@@ -110,6 +111,11 @@ ROTA_CLIENTE_RESUMO = re.compile(r"^/clientes/(\d+)/resumo$")
 # Relatório de atendimento (handoff + tempo de resposta humana de verdade —
 # ver eventos_atendimento em db.py). `/<dias>` opcional, padrão 30.
 ROTA_CLIENTE_ATENDIMENTO_RELATORIO = re.compile(r"^/clientes/(\d+)/atendimento-relatorio(?:/(\d+))?$")
+# Diagnóstico do Kommo (01/11/2026) — testar a busca por telefone e ver o
+# cartão de um lead sem precisar mandar mensagem de WhatsApp a cada
+# tentativa, nem esperar redeploy. Só leitura, usa a credencial já salva.
+ROTA_CLIENTE_KOMMO_TELEFONE = re.compile(r"^/clientes/(\d+)/kommo/telefone/([\d+ ()-]+)$")
+ROTA_CLIENTE_KOMMO_LEAD = re.compile(r"^/clientes/(\d+)/kommo/lead/(\d+)$")
 ROTA_CLIENTES_AVISO = re.compile(r"^/clientes-aviso$")
 # Visão agregada de todos os clientes — quantas vezes cada ferramenta é
 # chamada, quanto demora, quanto falha (ver metricas.py). `/metricas/<dias>`
@@ -438,6 +444,32 @@ class Handler(BaseHTTPRequestHandler):
                 return
             dias = int(m.group(2)) if m.group(2) else 30
             self._responder_json(200, db.relatorio_atendimento(cliente_id, dias))
+            return
+
+        m = ROTA_CLIENTE_KOMMO_TELEFONE.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if not credenciais:
+                self._responder_json(404, {"error": "cliente sem Kommo cadastrado"})
+                return
+            bruto = kommo_cartao.buscar_lead_por_telefone(
+                credenciais["kommo_domain"], credenciais["access_token"], m.group(2))
+            self._responder_json(200, json.loads(bruto) if not bruto.startswith("erro")
+                                 else {"erro": bruto})
+            return
+
+        m = ROTA_CLIENTE_KOMMO_LEAD.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if not credenciais:
+                self._responder_json(404, {"error": "cliente sem Kommo cadastrado"})
+                return
+            bruto = kommo_cartao.consultar_cartao_lead(
+                credenciais["kommo_domain"], credenciais["access_token"], m.group(2))
+            self._responder_json(200, json.loads(bruto) if not bruto.startswith("erro")
+                                 else {"erro": bruto})
             return
 
         m = ROTA_CLIENTE_QA_PENDENTES.match(self.path)
