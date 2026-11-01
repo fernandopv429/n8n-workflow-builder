@@ -259,20 +259,37 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
     token = credenciais.get("access_token", "")
     if not dominio or not token:
         return
+    tel = contato["id_whatsapp"]
     try:
-        bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, contato["id_whatsapp"])
+        bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, tel)
         if bruto.startswith("erro"):
+            db.registrar_log(cliente["id"], "erro",
+                             f"[worker] falha ao buscar lead do Kommo p/ {tel}: {bruto}")
             return
         lead = json.loads(bruto)
         if not lead.get("encontrado"):
+            # Log em nível "sistema" (não erro): é o caminho normal pra
+            # cliente sem lead pré-existente pra este telefone — mas sem
+            # isso ninguém teria como distinguir "não achou" de "achou e já
+            # tinha tag" só olhando o painel, que foi exatamente a dúvida
+            # que motivou este log (01/11/2026).
+            db.registrar_log(cliente["id"], "sistema",
+                             f"[worker] contato novo {tel}: nenhum lead encontrado no "
+                             "Kommo por este telefone — IA responde normal, sem tag.")
             return
         tags = lead.get("tags", [])
         if TAG_IA_ATIVA in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
+            db.registrar_log(cliente["id"], "sistema",
+                             f"[worker] contato novo {tel}: lead {lead.get('id')} já tinha "
+                             f"tag ({', '.join(tags) or '-'}), não mexi.")
             return
         resultado = kommo_cartao.adicionar_tag(
             dominio, token, str(lead["id"]), TAG_IA_ATIVA, ", ".join(tags))
         if resultado.startswith("erro"):
             raise RuntimeError(resultado)
+        db.registrar_log(cliente["id"], "sistema",
+                         f"[worker] contato novo {tel}: tag IA ATIVA adicionada ao "
+                         f"lead {lead.get('id')} no Kommo.")
     except Exception as e:  # noqa: BLE001 — provisionar é bônus, não trava a 1a mensagem
         db.registrar_log(cliente["id"], "erro",
                          f"[worker] falha ao provisionar tag IA ATIVA no Kommo: {e}")
