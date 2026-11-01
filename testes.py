@@ -938,6 +938,7 @@ def teste_telefone_e_tags_do_lead_busca_contato_vinculado():
         chamadas.append(caminho)
         if caminho.startswith("/api/v4/leads/"):
             return {
+                "status_id": 111, "pipeline_id": 222,
                 "_embedded": {
                     "tags": [{"name": "vip"}],
                     "contacts": [{"id": 18815296}],
@@ -953,7 +954,8 @@ def teste_telefone_e_tags_do_lead_busca_contato_vinculado():
     finally:
         k._chamar = original
     info = json.loads(r)
-    assert info == {"telefone": "5511942029143", "tags": ["vip"]}
+    assert info == {"telefone": "5511942029143", "tags": ["vip"],
+                    "status_id": 111, "pipeline_id": 222}
     assert chamadas == ["/api/v4/leads/28603587?with=contacts", "/api/v4/contacts/18815296"]
 
 
@@ -965,7 +967,126 @@ def teste_telefone_e_tags_do_lead_sem_contato_devolve_telefone_vazio():
         r = k.telefone_e_tags_do_lead("cliente", "tok", "1")
     finally:
         k._chamar = original
-    assert json.loads(r) == {"telefone": "", "tags": []}
+    assert json.loads(r) == {"telefone": "", "tags": [], "status_id": None, "pipeline_id": None}
+
+
+def _handler_kommo_dublado(telefone_e_tags, obter_anterior):
+    """Instância de servidor.Handler sem passar pelo __init__ do
+    BaseHTTPRequestHandler (que exige socket de verdade) — válido porque
+    `_processar_lead_kommo` só usa `self` como ligação do método, nunca lê
+    `self.rfile`/`self.wfile`."""
+    import db
+    import kommo_cartao
+    import servidor
+    import worker_agente  # noqa: F401 — garante que a importação de servidor não falhe por efeito colateral
+    chamadas = []
+    originais = {
+        "telefone_e_tags": kommo_cartao.telefone_e_tags_do_lead,
+        "adicionar_tag": kommo_cartao.adicionar_tag,
+        "obter_anterior": db.obter_lead_kommo_por_id,
+        "salvar": db.salvar_lead_kommo,
+        "evento": db.registrar_evento_lead_kommo,
+        "log": db.registrar_log,
+    }
+    kommo_cartao.telefone_e_tags_do_lead = telefone_e_tags
+    kommo_cartao.adicionar_tag = lambda *a: (
+        chamadas.append(("tag", a)) or '{"tags_agora": ["IA ATIVA"]}')
+    db.obter_lead_kommo_por_id = obter_anterior
+    db.salvar_lead_kommo = lambda *a: chamadas.append(("salvar", a))
+    db.registrar_evento_lead_kommo = lambda *a: chamadas.append(("evento", a))
+    db.registrar_log = lambda *a: chamadas.append(("log", a))
+    handler = object.__new__(servidor.Handler)
+    return handler, chamadas, originais
+
+
+def _restaura_handler_kommo(originais):
+    import db
+    import kommo_cartao
+    kommo_cartao.telefone_e_tags_do_lead = originais["telefone_e_tags"]
+    kommo_cartao.adicionar_tag = originais["adicionar_tag"]
+    db.obter_lead_kommo_por_id = originais["obter_anterior"]
+    db.salvar_lead_kommo = originais["salvar"]
+    db.registrar_evento_lead_kommo = originais["evento"]
+    db.registrar_log = originais["log"]
+
+
+def teste_processar_lead_kommo_novo_provisiona_e_registra_criado():
+    handler, chamadas, originais = _handler_kommo_dublado(
+        telefone_e_tags=lambda *a: json.dumps({
+            "telefone": "5511999999999", "tags": [], "status_id": 1, "pipeline_id": 2}),
+        obter_anterior=lambda *a: None,
+    )
+    try:
+        handler._processar_lead_kommo(1, {"kommo_domain": "c", "access_token": "t"}, "99")
+    finally:
+        _restaura_handler_kommo(originais)
+    assert any(c[0] == "tag" for c in chamadas), "lead sem tag nenhuma tinha que provisionar"
+    evento = next(c[1] for c in chamadas if c[0] == "evento")
+    assert evento[0:3] == (1, "99", "5511999999999") and evento[3] == "criado"
+
+
+def teste_processar_lead_kommo_existente_sem_mudanca_nao_registra_nada():
+    handler, chamadas, originais = _handler_kommo_dublado(
+        telefone_e_tags=lambda *a: json.dumps({
+            "telefone": "5511999999999", "tags": ["IA ATIVA"], "status_id": 1, "pipeline_id": 2}),
+        obter_anterior=lambda *a: {"telefone": "5511999999999", "tags": ["IA ATIVA"],
+                                   "status_id": 1, "pipeline_id": 2},
+    )
+    try:
+        handler._processar_lead_kommo(1, {"kommo_domain": "c", "access_token": "t"}, "99")
+    finally:
+        _restaura_handler_kommo(originais)
+    assert not any(c[0] in ("evento", "salvar") for c in chamadas), chamadas
+
+
+def teste_processar_lead_kommo_tag_mudou_registra_mudou():
+    handler, chamadas, originais = _handler_kommo_dublado(
+        telefone_e_tags=lambda *a: json.dumps({
+            "telefone": "5511999999999", "tags": ["IA ATIVA", "LQIA"],
+            "status_id": 1, "pipeline_id": 2}),
+        obter_anterior=lambda *a: {"telefone": "5511999999999", "tags": ["IA ATIVA"],
+                                   "status_id": 1, "pipeline_id": 2},
+    )
+    try:
+        handler._processar_lead_kommo(1, {"kommo_domain": "c", "access_token": "t"}, "99")
+    finally:
+        _restaura_handler_kommo(originais)
+    evento = next(c[1] for c in chamadas if c[0] == "evento")
+    assert evento[3] == "mudou"
+    assert evento[4]["tags"] == {"antes": ["IA ATIVA"], "depois": ["IA ATIVA", "LQIA"]}
+    assert "etapa" not in evento[4]
+
+
+def teste_processar_lead_kommo_etapa_mudou_registra_mudou():
+    handler, chamadas, originais = _handler_kommo_dublado(
+        telefone_e_tags=lambda *a: json.dumps({
+            "telefone": "5511999999999", "tags": ["IA ATIVA"],
+            "status_id": 999, "pipeline_id": 2}),
+        obter_anterior=lambda *a: {"telefone": "5511999999999", "tags": ["IA ATIVA"],
+                                   "status_id": 1, "pipeline_id": 2},
+    )
+    try:
+        handler._processar_lead_kommo(1, {"kommo_domain": "c", "access_token": "t"}, "99")
+    finally:
+        _restaura_handler_kommo(originais)
+    evento = next(c[1] for c in chamadas if c[0] == "evento")
+    assert evento[3] == "mudou"
+    assert evento[4]["etapa"]["antes"]["status_id"] == 1
+    assert evento[4]["etapa"]["depois"]["status_id"] == 999
+    assert "tags" not in evento[4]
+
+
+def teste_processar_lead_kommo_sem_telefone_nao_registra_nada():
+    handler, chamadas, originais = _handler_kommo_dublado(
+        telefone_e_tags=lambda *a: json.dumps(
+            {"telefone": "", "tags": [], "status_id": None, "pipeline_id": None}),
+        obter_anterior=lambda *a: None,
+    )
+    try:
+        handler._processar_lead_kommo(1, {"kommo_domain": "c", "access_token": "t"}, "99")
+    finally:
+        _restaura_handler_kommo(originais)
+    assert not any(c[0] in ("evento", "salvar", "tag") for c in chamadas), chamadas
 
 
 def teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao():
@@ -1505,6 +1626,11 @@ TESTES = [
     teste_kommo_cartao_nao_depende_de_mcp,
     teste_telefone_e_tags_do_lead_busca_contato_vinculado,
     teste_telefone_e_tags_do_lead_sem_contato_devolve_telefone_vazio,
+    teste_processar_lead_kommo_novo_provisiona_e_registra_criado,
+    teste_processar_lead_kommo_existente_sem_mudanca_nao_registra_nada,
+    teste_processar_lead_kommo_tag_mudou_registra_mudou,
+    teste_processar_lead_kommo_etapa_mudou_registra_mudou,
+    teste_processar_lead_kommo_sem_telefone_nao_registra_nada,
     teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao,
     teste_executar_kommo_cartao_ignora_credencial_do_modelo,
     teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo,

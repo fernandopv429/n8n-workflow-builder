@@ -196,12 +196,19 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(bruto)
 
     def _webhook_kommo(self, cliente_id: int, token: str):
-        """Recebe o evento "lead criado" do Kommo (form-urlencoded, não
-        JSON — é assim que o Kommo manda webhook). Responde 200 na hora,
-        antes de processar: o Kommo espera resposta rápida e reenvia em
-        retry se não receber — processar primeiro e responder depois
-        arriscaria o Kommo achar que falhou e mandar de novo o que já deu
-        certo."""
+        """Recebe os eventos do Kommo (form-urlencoded, não JSON — é assim
+        que o Kommo manda webhook): "lead criado" (add_lead), "lead
+        atualizado" (update_lead, inclui tag mudando) e "etapa do funil
+        mudou" (status_lead) — ver registro em `_responder_json` mais
+        abaixo. Nos três casos o payload só traz o lead_id; o estado de
+        verdade (telefone, tags, etapa) vem de uma consulta à parte (ver
+        kommo_cartao.telefone_e_tags_do_lead), e o que mudou é descoberto
+        comparando com o que `kommo_leads` já tinha guardado.
+
+        Responde 200 na hora, antes de processar: o Kommo espera resposta
+        rápida e reenvia em retry se não receber — processar primeiro e
+        responder depois arriscaria o Kommo achar que falhou e mandar de
+        novo o que já deu certo."""
         tamanho = int(self.headers.get("Content-Length", 0))
         bruto = self.rfile.read(tamanho) if tamanho else b""
         self._responder_json(200, {"ok": True})
@@ -215,37 +222,68 @@ class Handler(BaseHTTPRequestHandler):
         campos = urllib.parse.parse_qs(bruto.decode("utf-8", "replace"))
         ids_lead = sorted({
             v[0] for k, v in campos.items()
-            if re.match(r"^leads\[add\]\[\d+\]\[id\]$", k) and v
+            if re.match(r"^leads\[(add|update|status)\]\[\d+\]\[id\]$", k) and v
         })
         for lead_id in ids_lead:
             try:
-                bruto_info = kommo_cartao.telefone_e_tags_do_lead(
-                    credenciais["kommo_domain"], credenciais["access_token"], lead_id)
-                if bruto_info.startswith("erro"):
-                    raise RuntimeError(bruto_info)
-                info = json.loads(bruto_info)
-                telefone, tags = info.get("telefone", ""), info.get("tags", [])
-                if not telefone:
-                    db.registrar_log(cliente_id, "sistema",
-                                     f"[webhook kommo] lead {lead_id} novo sem telefone "
-                                     "cadastrado no contato — não dá pra ligar a um "
-                                     "contato do WhatsApp.")
-                    continue
-                if (worker_agente.TAG_IA_ATIVA not in tags
-                        and worker_agente.TAG_TRANSFERIDO_ATENDENTE not in tags):
-                    resultado = kommo_cartao.adicionar_tag(
-                        credenciais["kommo_domain"], credenciais["access_token"],
-                        lead_id, worker_agente.TAG_IA_ATIVA, ", ".join(tags))
-                    if resultado.startswith("erro"):
-                        raise RuntimeError(resultado)
-                    tags = tags + [worker_agente.TAG_IA_ATIVA]
-                db.salvar_lead_kommo(cliente_id, telefone, int(lead_id), tags)
-                db.registrar_log(cliente_id, "sistema",
-                                 f"[webhook kommo] lead {lead_id} novo: telefone {telefone}, "
-                                 f"tags {tags or '-'}.")
+                self._processar_lead_kommo(cliente_id, credenciais, lead_id)
             except Exception as e:  # noqa: BLE001 — um lead falhando não pode travar os outros
                 db.registrar_log(cliente_id, "erro",
                                  f"[webhook kommo] falha ao processar lead {lead_id}: {e}")
+
+    def _processar_lead_kommo(self, cliente_id: int, credenciais: dict, lead_id: str):
+        bruto_info = kommo_cartao.telefone_e_tags_do_lead(
+            credenciais["kommo_domain"], credenciais["access_token"], lead_id)
+        if bruto_info.startswith("erro"):
+            raise RuntimeError(bruto_info)
+        info = json.loads(bruto_info)
+        telefone = info.get("telefone", "")
+        tags, status_id, pipeline_id = (info.get("tags", []), info.get("status_id"),
+                                        info.get("pipeline_id"))
+        if not telefone:
+            db.registrar_log(cliente_id, "sistema",
+                             f"[webhook kommo] lead {lead_id} sem telefone cadastrado no "
+                             "contato — não dá pra ligar a um contato do WhatsApp.")
+            return
+
+        anterior = db.obter_lead_kommo_por_id(cliente_id, lead_id)
+        if anterior is None:
+            # Primeira vez que vemos este lead (normalmente o "lead criado",
+            # mas também cobre um "update"/"status" de um lead que nasceu
+            # antes do webhook existir) — provisiona a tag como no contato
+            # novo via WhatsApp (_provisionar_tag_ia_ativa), só que aqui a
+            # gente já tem o lead_id, sem precisar buscar por telefone.
+            if (worker_agente.TAG_IA_ATIVA not in tags
+                    and worker_agente.TAG_TRANSFERIDO_ATENDENTE not in tags):
+                resultado = kommo_cartao.adicionar_tag(
+                    credenciais["kommo_domain"], credenciais["access_token"],
+                    lead_id, worker_agente.TAG_IA_ATIVA, ", ".join(tags))
+                if resultado.startswith("erro"):
+                    raise RuntimeError(resultado)
+                tags = json.loads(resultado).get("tags_agora", tags + [worker_agente.TAG_IA_ATIVA])
+            db.salvar_lead_kommo(cliente_id, telefone, int(lead_id), tags, status_id, pipeline_id)
+            db.registrar_evento_lead_kommo(cliente_id, lead_id, telefone, "criado",
+                                           {"tags": tags, "status_id": status_id,
+                                            "pipeline_id": pipeline_id})
+            db.registrar_log(cliente_id, "sistema",
+                             f"[webhook kommo] lead {lead_id} novo: telefone {telefone}, "
+                             f"tags {tags or '-'}.")
+            return
+
+        mudancas = {}
+        if set(anterior["tags"]) != set(tags):
+            mudancas["tags"] = {"antes": anterior["tags"], "depois": tags}
+        if anterior["status_id"] != status_id or anterior["pipeline_id"] != pipeline_id:
+            mudancas["etapa"] = {
+                "antes": {"status_id": anterior["status_id"], "pipeline_id": anterior["pipeline_id"]},
+                "depois": {"status_id": status_id, "pipeline_id": pipeline_id},
+            }
+        if not mudancas:
+            return  # webhook chegou (ex: edição de campo que não rastreamos) mas nada que importa mudou
+        db.salvar_lead_kommo(cliente_id, telefone, int(lead_id), tags, status_id, pipeline_id)
+        db.registrar_evento_lead_kommo(cliente_id, lead_id, telefone, "mudou", mudancas)
+        db.registrar_log(cliente_id, "sistema",
+                         f"[webhook kommo] lead {lead_id} mudou: {mudancas}")
 
     # --- autenticação -------------------------------------------------
 
@@ -876,7 +914,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 resposta = kommo_cartao._chamar(  # noqa: SLF001 — registro é infra, não ferramenta do agente
                     credenciais["kommo_domain"], credenciais["access_token"], "POST",
-                    "/api/v4/webhooks", {"destination": destino, "settings": ["add_lead"]})
+                    "/api/v4/webhooks", {"destination": destino,
+                                        "settings": ["add_lead", "update_lead", "status_lead"]})
             except RuntimeError as e:
                 db.registrar_log(cliente_id, "erro", f"Falha ao registrar webhook do Kommo: {e}")
                 self._responder_json(502, {"error": str(e)})

@@ -230,6 +230,7 @@ def buscar_lead_por_telefone(kommo_domain: str, access_token: str, telefone: str
     lead = _chamar(kommo_domain, access_token, "GET", f"/api/v4/leads/{lead_id}")
     return json.dumps({
         "encontrado": True, "id": lead_id, "tags": _tags_do_lead(lead),
+        "status_id": lead.get("status_id"), "pipeline_id": lead.get("pipeline_id"),
     }, ensure_ascii=False)
 
 
@@ -255,7 +256,10 @@ def telefone_e_tags_do_lead(kommo_domain: str, access_token: str, lead_id: str) 
                     telefone = "".join(
                         ch for ch in str(valores[0].get("value", "")) if ch.isdigit())
                     break
-    return json.dumps({"telefone": telefone, "tags": _tags_do_lead(lead)}, ensure_ascii=False)
+    return json.dumps({
+        "telefone": telefone, "tags": _tags_do_lead(lead),
+        "status_id": lead.get("status_id"), "pipeline_id": lead.get("pipeline_id"),
+    }, ensure_ascii=False)
 
 
 @_legivel

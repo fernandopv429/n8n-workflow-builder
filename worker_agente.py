@@ -286,8 +286,9 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
                              "Kommo por este telefone — IA responde normal, sem tag.")
             return
         tags = lead.get("tags", [])
+        status_id, pipeline_id = lead.get("status_id"), lead.get("pipeline_id")
         if TAG_IA_ATIVA in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
-            db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags)
+            db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags, status_id, pipeline_id)
             db.registrar_log(cliente["id"], "sistema",
                              f"[worker] contato novo {tel}: lead {lead.get('id')} já tinha "
                              f"tag ({', '.join(tags) or '-'}), não mexi.")
@@ -297,7 +298,7 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
         if resultado.startswith("erro"):
             raise RuntimeError(resultado)
         tags_agora = json.loads(resultado).get("tags_agora", tags + [TAG_IA_ATIVA])
-        db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags_agora)
+        db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags_agora, status_id, pipeline_id)
         db.registrar_log(cliente["id"], "sistema",
                          f"[worker] contato novo {tel}: tag IA ATIVA adicionada ao "
                          f"lead {lead.get('id')} no Kommo.")
@@ -348,7 +349,8 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         tags = lead.get("tags", [])
         # Cacheia pra próxima mensagem não precisar buscar ao vivo de novo —
         # mesma função que o webhook usa pra alimentar `kommo_leads`.
-        db.salvar_lead_kommo(cliente["id"], contato["id_whatsapp"], lead["id"], tags)
+        db.salvar_lead_kommo(cliente["id"], contato["id_whatsapp"], lead["id"], tags,
+                            lead.get("status_id"), lead.get("pipeline_id"))
     except Exception as e:  # noqa: BLE001 — falha na checagem nunca pode calar a IA
         db.registrar_log(cliente["id"], "erro",
                          f"[worker] falha ao checar tag de ativação no Kommo: {e}")

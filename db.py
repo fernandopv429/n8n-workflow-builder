@@ -370,6 +370,33 @@ def garantir_schema():
                 PRIMARY KEY (cliente_id, telefone)
             )
         """)
+        # 01/11/2026: Fernando pediu os outros eventos do webhook também
+        # ("update_lead" tag mudou, "status_lead" etapa do funil mudou) —
+        # além de manter `kommo_leads` sincronizado, guarda o que mudou de
+        # fato em `kommo_lead_eventos`, virando a trilha de auditoria que
+        # faltava pra alimentar uma futura análise de etapas do funil
+        # (ficou fora de escopo até agora por falta exatamente disso).
+        conn.execute("ALTER TABLE kommo_leads ADD COLUMN IF NOT EXISTS status_id BIGINT")
+        conn.execute("ALTER TABLE kommo_leads ADD COLUMN IF NOT EXISTS pipeline_id BIGINT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kommo_leads_lead_id "
+            "ON kommo_leads (cliente_id, lead_id)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kommo_lead_eventos (
+                id SERIAL PRIMARY KEY,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+                lead_id BIGINT NOT NULL,
+                telefone TEXT,
+                tipo TEXT NOT NULL CHECK (tipo IN ('criado', 'mudou')),
+                detalhe JSONB,
+                criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kommo_lead_eventos_lead "
+            "ON kommo_lead_eventos (cliente_id, lead_id, criado_em)"
+        )
 
 
 # --- estado do agente de atendimento ------------------------------------
@@ -1261,19 +1288,26 @@ def webhook_kommo_token_confere(cliente_id: int, token: str) -> bool:
     return bool(linha and linha[0] and hmac.compare_digest(linha[0], token))
 
 
-def salvar_lead_kommo(cliente_id: int, telefone: str, lead_id: int, tags: list):
-    """Upsert do estado do lead (telefone -> lead_id + tags), espelhado do
-    Kommo via webhook. `telefone` sempre só dígitos, pra bater exatamente com
-    `contato["id_whatsapp"]` na hora do gating (ver worker_agente.py)."""
+def salvar_lead_kommo(cliente_id: int, telefone: str, lead_id: int, tags: list,
+                      status_id: int = None, pipeline_id: int = None):
+    """Upsert do estado do lead (telefone -> lead_id + tags + etapa),
+    espelhado do Kommo via webhook. `telefone` sempre só dígitos, pra bater
+    exatamente com `contato["id_whatsapp"]` na hora do gating (ver
+    worker_agente.py). `status_id`/`pipeline_id` ficam None quando quem
+    chama não tem essa informação (ex: busca ao vivo antiga, que só trazia
+    tags) — não é erro, só dado que ainda não veio."""
     with _conectar() as conn:
         conn.execute(
             """
-            INSERT INTO kommo_leads (cliente_id, telefone, lead_id, tags, atualizado_em)
-            VALUES (%s, %s, %s, %s, now())
+            INSERT INTO kommo_leads
+                (cliente_id, telefone, lead_id, tags, status_id, pipeline_id, atualizado_em)
+            VALUES (%s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (cliente_id, telefone) DO UPDATE
-                SET lead_id = EXCLUDED.lead_id, tags = EXCLUDED.tags, atualizado_em = now()
+                SET lead_id = EXCLUDED.lead_id, tags = EXCLUDED.tags,
+                    status_id = EXCLUDED.status_id, pipeline_id = EXCLUDED.pipeline_id,
+                    atualizado_em = now()
             """,
-            (cliente_id, telefone, lead_id, ", ".join(tags)),
+            (cliente_id, telefone, lead_id, ", ".join(tags), status_id, pipeline_id),
         )
 
 
@@ -1283,12 +1317,49 @@ def obter_lead_kommo(cliente_id: int, telefone: str) -> dict | None:
     vivo nesse caso (ver worker_agente.py)."""
     with _conectar() as conn:
         linha = conn.execute(
-            "SELECT lead_id, tags FROM kommo_leads WHERE cliente_id = %s AND telefone = %s",
+            "SELECT lead_id, tags, status_id, pipeline_id FROM kommo_leads "
+            "WHERE cliente_id = %s AND telefone = %s",
             (cliente_id, telefone),
         ).fetchone()
     if not linha:
         return None
-    return {"id": linha[0], "tags": [t.strip() for t in linha[1].split(",") if t.strip()]}
+    return {"id": linha[0], "tags": [t.strip() for t in linha[1].split(",") if t.strip()],
+           "status_id": linha[2], "pipeline_id": linha[3]}
+
+
+def obter_lead_kommo_por_id(cliente_id: int, lead_id) -> dict | None:
+    """Mesma leitura de `obter_lead_kommo`, só que pela chave do Kommo em vez
+    do telefone — usado pelo recebedor do webhook pra saber o estado ANTES
+    de um evento "lead atualizado"/"etapa mudou", já que esses eventos só
+    trazem o lead_id, não o telefone (que só se descobre buscando o contato
+    vinculado — ver kommo_cartao.telefone_e_tags_do_lead)."""
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT telefone, tags, status_id, pipeline_id FROM kommo_leads "
+            "WHERE cliente_id = %s AND lead_id = %s",
+            (cliente_id, int(lead_id)),
+        ).fetchone()
+    if not linha:
+        return None
+    return {"telefone": linha[0], "tags": [t.strip() for t in linha[1].split(",") if t.strip()],
+           "status_id": linha[2], "pipeline_id": linha[3]}
+
+
+def registrar_evento_lead_kommo(cliente_id: int, lead_id, telefone: str, tipo: str,
+                                detalhe: dict = None):
+    """Trilha de auditoria do que mudou num lead (criação, ou qualquer
+    diferença detectada num evento de atualização/etapa) — é o dado que
+    falta hoje pra uma futura análise de etapas do funil (ver
+    db.relatorio_atendimento, que cobre handoff mas não etapa de funil)."""
+    with _conectar() as conn:
+        conn.execute(
+            """
+            INSERT INTO kommo_lead_eventos (cliente_id, lead_id, telefone, tipo, detalhe)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (cliente_id, int(lead_id), telefone, tipo,
+             json.dumps(detalhe) if detalhe is not None else None),
+        )
 
 
 def obter_credenciais_kommo(cliente_id: int) -> dict:
