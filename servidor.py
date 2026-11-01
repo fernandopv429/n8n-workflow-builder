@@ -77,6 +77,7 @@ ROTA_CLIENTE_IMAGEM = re.compile(r"^/clientes/(\d+)/imagem$")
 # Atendimento (ARQUITETURA-AGENTE.md): conversas do agente com os pacientes,
 # separadas do chat do painel — que é o operador falando SOBRE o cliente.
 ROTA_CLIENTE_CONTATOS = re.compile(r"^/clientes/(\d+)/contatos$")
+ROTA_CONTATO_ID = re.compile(r"^/contatos/(\d+)$")
 ROTA_CONTATO_MENSAGENS = re.compile(r"^/contatos/(\d+)/mensagens$")
 ROTA_CONTATO_STATUS = re.compile(r"^/contatos/(\d+)/status$")
 # Zera a memória de uma conversa sem apagar o contato (ver db.limpar_conversa).
@@ -986,6 +987,18 @@ class Handler(BaseHTTPRequestHandler):
             db.registrar_log(int(m.group(1)), "sistema",
                              f"Ferramenta '{apelido}' desligada deste cliente.")
             self._responder_json(200, {"removido": True})
+            return
+
+        m = ROTA_CONTATO_ID.match(self.path)
+        if m:
+            # Apaga o contato inteiro (mensagens e eventos de atendimento
+            # juntos, via ON DELETE CASCADE) — diferente do reset, que só
+            # limpa a conversa. Uso principal: contato de teste que precisa
+            # "nascer" de novo pro provisionamento da tag IA ATIVA rodar
+            # (ele só dispara na primeira mensagem de um contato que o
+            # sistema nunca viu — ver worker_agente.py:_provisionar_tag_ia_ativa).
+            removido = db.excluir_contato(int(m.group(1)))
+            self._responder_json(200, {"removido": removido})
             return
 
         m = ROTA_CLIENTE_ID.match(self.path)

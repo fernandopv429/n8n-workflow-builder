@@ -618,6 +618,16 @@ def limpar_conversa(contato_id: int) -> int:
     return n or 0
 
 
+def excluir_contato(contato_id: int) -> bool:
+    """Apaga o contato inteiro — diferente de `limpar_conversa`, que só
+    esvazia o histórico e mantém a linha. Mensagens, avaliações de QA e
+    eventos de atendimento saem juntos (`ON DELETE CASCADE`). Devolve False
+    se o id não existia."""
+    with _conectar() as conn:
+        n = conn.execute("DELETE FROM contatos WHERE id = %s", (contato_id,)).rowcount
+    return bool(n)
+
+
 def definir_status_contato(contato_id: int, status: str):
     """'HUMANO' tira o contato do atendimento automático — é o handoff. O worker
     confere isso ANTES de responder, senão a IA fala por cima do atendente."""
