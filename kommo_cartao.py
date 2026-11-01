@@ -204,20 +204,32 @@ def criar_tarefa(kommo_domain: str, access_token: str, lead_id: str,
 
 @_legivel
 def buscar_lead_por_telefone(kommo_domain: str, access_token: str, telefone: str) -> str:
-    """Busca o lead cujo contato tem este telefone — usa a busca por texto
-    livre da API do Kommo (`?query=`), então o número vai só com dígitos,
-    sem +, espaço ou traço. Devolve o PRIMEIRO resultado (um telefone raras
-    vezes bate em mais de um lead). {"encontrado": false} se não achar
-    nenhum — não cria lead nenhum, só procura."""
+    """Busca o lead vinculado ao CONTATO que tem este telefone.
+
+    O telefone mora no contato, não no lead — `/api/v4/leads?query=` não
+    alcança esse campo (confirmado 01/11/2026: lead existia, telefone batia
+    até com o "+" igual ao salvo no Kommo, e a busca por lead não achava
+    nada). Por isso dois passos: busca o CONTATO por telefone
+    (`/api/v4/contacts?query=`, que searcha phone/email de verdade), pega o
+    primeiro lead ligado a ele, e só então consulta esse lead pras tags.
+
+    Devolve o PRIMEIRO contato/lead encontrado (um telefone raras vezes bate
+    em mais de um). {"encontrado": false} se não achar contato, ou se achar
+    o contato mas ele não tiver nenhum lead vinculado — não cria nada, só
+    procura."""
     numero = "".join(ch for ch in telefone if ch.isdigit())
     d = _chamar(kommo_domain, access_token, "GET",
-                f"/api/v4/leads?query={urllib.parse.quote(numero)}&with=contacts")
-    leads = (d.get("_embedded") or {}).get("leads") or []
-    if not leads:
+                f"/api/v4/contacts?query={urllib.parse.quote(numero)}&with=leads")
+    contatos = (d.get("_embedded") or {}).get("contacts") or []
+    if not contatos:
         return json.dumps({"encontrado": False}, ensure_ascii=False)
-    lead = leads[0]
+    leads_do_contato = ((contatos[0].get("_embedded") or {}).get("leads") or [])
+    if not leads_do_contato:
+        return json.dumps({"encontrado": False}, ensure_ascii=False)
+    lead_id = leads_do_contato[0]["id"]
+    lead = _chamar(kommo_domain, access_token, "GET", f"/api/v4/leads/{lead_id}")
     return json.dumps({
-        "encontrado": True, "id": lead.get("id"), "tags": _tags_do_lead(lead),
+        "encontrado": True, "id": lead_id, "tags": _tags_do_lead(lead),
     }, ensure_ascii=False)
 
 
