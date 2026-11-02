@@ -917,8 +917,9 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/v4/webhooks", {"destination": destino,
                                         "settings": ["add_lead", "update_lead", "status_lead"]})
             except RuntimeError as e:
-                db.registrar_log(cliente_id, "erro", f"Falha ao registrar webhook do Kommo: {e}")
-                self._responder_json(502, {"error": str(e)})
+                db.registrar_log(cliente_id, "erro",
+                                 f"Falha ao registrar webhook do Kommo (destino {destino}): {e}")
+                self._responder_json(502, {"error": str(e), "destino_tentado": destino})
                 return
             db.registrar_log(cliente_id, "sistema",
                              f"Webhook do Kommo registrado (lead criado) -> {destino}")
