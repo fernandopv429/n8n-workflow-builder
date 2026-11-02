@@ -1676,6 +1676,85 @@ def teste_provisionar_tag_falha_vira_log_sem_levantar_excecao():
     assert any(c[0] == "log" for c in chamadas)
 
 
+# --- chat de gerenciamento resolve lead por telefone citado (02/11/2026) ---
+
+def teste_telefones_na_mensagem_extrai_numeros_plausiveis():
+    import agente_chat as ac
+    achados = ac._telefones_na_mensagem(
+        "move o lead do (55) 11 99999-8888 pra etapa 2, e ignora o pedido 123")
+    assert achados == ["5511999998888"]
+
+
+def teste_telefones_na_mensagem_sem_numero_devolve_vazio():
+    import agente_chat as ac
+    assert ac._telefones_na_mensagem("move o lead do Gabriel pra etapa 2") == []
+
+
+def _com_leads_dublado(lead_cache=None, lead_busca_ao_vivo=None, credenciais=None):
+    import db
+    import kommo_cartao
+    chamadas = []
+    originais = {
+        "obter_lead_kommo": db.obter_lead_kommo,
+        "obter_credenciais_kommo": db.obter_credenciais_kommo,
+        "buscar_lead_por_telefone": kommo_cartao.buscar_lead_por_telefone,
+    }
+    db.obter_lead_kommo = lambda *a: (chamadas.append(("cache", a)) or lead_cache)
+    db.obter_credenciais_kommo = lambda *a: credenciais or {}
+    kommo_cartao.buscar_lead_por_telefone = lambda *a: (
+        chamadas.append(("busca_ao_vivo", a)) or lead_busca_ao_vivo)
+    return chamadas, originais
+
+
+def _restaura_leads(originais):
+    import db
+    import kommo_cartao
+    db.obter_lead_kommo = originais["obter_lead_kommo"]
+    db.obter_credenciais_kommo = originais["obter_credenciais_kommo"]
+    kommo_cartao.buscar_lead_por_telefone = originais["buscar_lead_por_telefone"]
+
+
+def teste_contexto_leads_usa_cache_local_sem_chamar_kommo():
+    import agente_chat as ac
+    chamadas, originais = _com_leads_dublado(lead_cache={"id": 2394054, "tags": ["IA ATIVA"]})
+    try:
+        r = ac._contexto_leads_mencionados(1, "move o lead do 5511999998888 pra etapa 2")
+    finally:
+        _restaura_leads(originais)
+    assert "2394054" in r
+    assert not any(c[0] == "busca_ao_vivo" for c in chamadas)
+
+
+def teste_contexto_leads_cai_pra_busca_ao_vivo_sem_cache():
+    import agente_chat as ac
+    chamadas, originais = _com_leads_dublado(
+        lead_cache=None,
+        lead_busca_ao_vivo='{"encontrado": true, "id": 777, "tags": []}',
+        credenciais={"kommo_domain": "cliente", "access_token": "tok"},
+    )
+    try:
+        r = ac._contexto_leads_mencionados(1, "o telefone é 5511999998888")
+    finally:
+        _restaura_leads(originais)
+    assert "777" in r
+    assert any(c[0] == "busca_ao_vivo" for c in chamadas)
+
+
+def teste_contexto_leads_sem_telefone_na_mensagem_devolve_vazio():
+    import agente_chat as ac
+    assert ac._contexto_leads_mencionados(1, "cria um funil novo chamado Vendas") == ""
+
+
+def teste_contexto_leads_sem_lead_encontrado_avisa_nao_achou():
+    import agente_chat as ac
+    chamadas, originais = _com_leads_dublado(lead_cache=None, lead_busca_ao_vivo='{"encontrado": false}')
+    try:
+        r = ac._contexto_leads_mencionados(1, "o telefone é 5511999998888")
+    finally:
+        _restaura_leads(originais)
+    assert "nenhum lead encontrado" in r
+
+
 # --- QA de atendimento (qa_atendimento.py) ------------------------------
 # O prompt do juiz tem um exemplo de JSON literal no meio do template —
 # achado ao escrever o módulo (30/10/2026): `str.format()` tenta resolver
@@ -1866,6 +1945,12 @@ TESTES = [
     teste_provisionar_tag_nao_mexe_se_lead_ja_tem_ia_ativa_ou_lqia,
     teste_provisionar_tag_sem_lead_nao_chama_adicionar_tag,
     teste_provisionar_tag_falha_vira_log_sem_levantar_excecao,
+    teste_telefones_na_mensagem_extrai_numeros_plausiveis,
+    teste_telefones_na_mensagem_sem_numero_devolve_vazio,
+    teste_contexto_leads_usa_cache_local_sem_chamar_kommo,
+    teste_contexto_leads_cai_pra_busca_ao_vivo_sem_cache,
+    teste_contexto_leads_sem_telefone_na_mensagem_devolve_vazio,
+    teste_contexto_leads_sem_lead_encontrado_avisa_nao_achou,
     teste_qa_renderiza_o_prompt_sem_quebrar_no_json_de_exemplo,
     teste_qa_aceita_veredito_valido,
     teste_qa_rejeita_severidade_fora_do_enum,

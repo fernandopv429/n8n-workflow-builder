@@ -18,6 +18,7 @@ sistema).
 """
 import json
 import pathlib
+import re
 import sys
 
 RAIZ = pathlib.Path(__file__).resolve().parent
@@ -31,6 +32,7 @@ from openai import OpenAI  # noqa: E402
 
 import briefing_batch  # noqa: E402
 import db  # noqa: E402
+import kommo_cartao  # noqa: E402
 import mcp_kommo_client  # noqa: E402
 import metricas  # noqa: E402
 
@@ -571,6 +573,52 @@ def buscar_respostas_em_lote(cliente_id: int) -> int:
     return chegaram
 
 
+def _telefones_na_mensagem(texto: str) -> list:
+    """Sequências de 8 a 15 dígitos no texto — candidatos a telefone (aceita
+    pontuação/espaço/+ junto, só os dígitos importam). Serve pra achar o
+    lead sem o operador ter que descobrir o ID sozinho."""
+    vistos, achados = set(), []
+    for bruto in re.findall(r"[\d][\d\s()+-]{6,}\d", texto):
+        numero = "".join(ch for ch in bruto if ch.isdigit())
+        if 8 <= len(numero) <= 15 and numero not in vistos:
+            vistos.add(numero)
+            achados.append(numero)
+    return achados
+
+
+def _contexto_leads_mencionados(cliente_id: int, texto: str) -> str:
+    """Se a mensagem citar um telefone, tenta resolver o lead correspondente
+    ANTES do modelo agir — cache local primeiro (`kommo_leads`, alimentado
+    pelo webhook do Kommo, mesma fonte que o atendimento do WhatsApp usa),
+    só cai pra busca ao vivo se não tiver em cache. Sem isso, o modelo tinha
+    que achar sozinho via `kommo_listar_leads` — e na prática, sem achar,
+    inventava um lead_id (02/11/2026, ver _system_prompt)."""
+    linhas = []
+    for telefone in _telefones_na_mensagem(texto):
+        lead = db.obter_lead_kommo(cliente_id, telefone)
+        if lead is None:
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if credenciais:
+                try:
+                    bruto = kommo_cartao.buscar_lead_por_telefone(
+                        credenciais["kommo_domain"], credenciais["access_token"], telefone)
+                    info = json.loads(bruto) if not bruto.startswith("erro") else {}
+                    if info.get("encontrado"):
+                        lead = {"id": info["id"], "tags": info.get("tags", [])}
+                except Exception:  # noqa: BLE001 — contexto é bônus, não pode travar o chat
+                    lead = None
+        if lead:
+            linhas.append(
+                f"- telefone {telefone}: lead_id {lead['id']} "
+                f"(tags: {', '.join(lead['tags']) or '-'})")
+        else:
+            linhas.append(f"- telefone {telefone}: nenhum lead encontrado no Kommo")
+    if not linhas:
+        return ""
+    return ("Leads já resolvidos pelos telefones citados na mensagem (use estes "
+            "IDs direto, não busque de novo nem invente outro):\n" + "\n".join(linhas))
+
+
 def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
     cliente = db.obter_cliente(cliente_id)
     if cliente is None:
@@ -585,6 +633,10 @@ def processar_mensagem(cliente_id: int, texto_usuario: str) -> str:
     historico = db.listar_mensagens(cliente_id)
     mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
     mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in historico if m["role"] in ("user", "assistant")]
+
+    contexto_leads = _contexto_leads_mencionados(cliente_id, texto_usuario)
+    if contexto_leads:
+        mensagens.append({"role": "system", "content": contexto_leads})
 
     ferramentas = _ferramentas_prompt() + _preparar_ferramentas_kommo()
 
