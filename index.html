@@ -128,6 +128,18 @@
     border-bottom: 1px solid var(--border); padding: 6px 8px; }
   .tabela-consumo td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 
+  .barra-analise { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .barra-analise-nome { flex: 0 0 150px; font-size: 13px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .barra-analise-trilho { flex: 1; height: 20px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .barra-analise-fill { height: 100%; border-radius: 3px; }
+  .barra-analise-valor { flex: 0 0 120px; font-size: 12px; color: var(--muted); text-align: right; }
+  .legenda-analise { display: flex; gap: 16px; font-size: 12px; color: var(--muted);
+    margin-bottom: 14px; }
+  .legenda-analise span { display: inline-flex; align-items: center; gap: 6px; }
+  .legenda-analise i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
   .abas { display: flex; gap: 2px; flex-wrap: wrap; flex: 1; }
   .aba {
     background: none; border: none; border-bottom: 2px solid transparent;
@@ -1464,6 +1476,27 @@ function _formatarDuracao(segundos) {
   return `${(segundos / 3600).toFixed(1)} h`;
 }
 
+function _barraAnalise(h, maxSegundos) {
+  const nome = escaparHtml(h.nome || h.id_whatsapp);
+  const motivo = escaparHtml(h.motivo || 'sem motivo informado');
+  const quando = new Date(h.handoff_em).toLocaleString('pt-BR');
+  const semResposta = !h.resposta_em;
+  const segundos = h.tempo_resposta_segundos || 0;
+  // Barra mínima de 4% mesmo pra respostas rapidíssimas — senão some da
+  // tela e parece que não teve resposta nenhuma.
+  const pct = semResposta ? 100 : Math.max(4, Math.round((segundos / maxSegundos) * 100));
+  const cor = semResposta ? 'var(--err)' : 'var(--accent)';
+  const valor = semResposta ? 'ainda sem resposta' : _formatarDuracao(segundos);
+  return `
+    <div class="barra-analise" title="${motivo} — pedido em ${quando}">
+      <div class="barra-analise-nome">${nome}</div>
+      <div class="barra-analise-trilho">
+        <div class="barra-analise-fill" style="width:${pct}%;background:${cor}"></div>
+      </div>
+      <div class="barra-analise-valor">${valor}</div>
+    </div>`;
+}
+
 async function carregarAnalise(dias) {
   dias = dias || 30;
   const caixa = document.getElementById('analise-conteudo');
@@ -1473,20 +1506,18 @@ async function carregarAnalise(dias) {
     d = await (await fetch(`/clientes/${clienteAtualId}/atendimento-relatorio/${dias}`)).json();
   } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
 
-  const linhas = (d.handoffs || []).map(h => `
-    <tr>
-      <td>${escaparHtml(h.nome || h.id_whatsapp)}</td>
-      <td>${escaparHtml(h.motivo || '')}</td>
-      <td>${new Date(h.handoff_em).toLocaleString('pt-BR')}</td>
-      <td>${h.resposta_em
-        ? _formatarDuracao(h.tempo_resposta_segundos)
-        : '<span class="opcional">ainda sem resposta</span>'}</td>
-    </tr>`).join('');
+  const handoffs = d.handoffs || [];
+  const LIMITE = 30;
+  const maxSegundos = Math.max(
+    1, ...handoffs.filter(h => h.resposta_em).map(h => h.tempo_resposta_segundos));
+  const barras = handoffs.slice(0, LIMITE).map(h => _barraAnalise(h, maxSegundos)).join('');
+  const truncado = handoffs.length > LIMITE
+    ? `<p class="hint">mostrando os ${LIMITE} mais recentes de ${handoffs.length}.</p>` : '';
 
   caixa.innerHTML = `
     <p class="hint">Quando o agente pediu um atendente, e quanto tempo levou até uma
       pessoa responder de verdade no WhatsApp — não o aviso automático do agente
-      dizendo que vai transferir.</p>
+      dizendo que vai transferir. Passe o mouse numa barra pra ver o motivo.</p>
     <div class="linha" style="gap:8px; margin-bottom:12px">
       <label for="analise-periodo">Período:</label>
       <select id="analise-periodo">
@@ -1496,10 +1527,14 @@ async function carregarAnalise(dias) {
       </select>
       <span class="opcional">${d.atendimentos || 0} atendimento(s) no período</span>
     </div>
-    <table class="tabela-consumo">
-      <thead><tr><th>contato</th><th>motivo</th><th>handoff pedido em</th><th>tempo até resposta humana</th></tr></thead>
-      <tbody>${linhas || '<tr><td colspan="4">nenhum handoff nesse período.</td></tr>'}</tbody>
-    </table>`;
+    ${handoffs.length ? `
+      <div class="legenda-analise">
+        <span><i style="background:var(--accent)"></i>tempo até resposta humana</span>
+        <span><i style="background:var(--err)"></i>ainda sem resposta</span>
+      </div>
+      ${barras}
+      ${truncado}
+    ` : '<p class="opcional">nenhum handoff nesse período.</p>'}`;
 
   document.getElementById('analise-periodo').addEventListener('change', (ev) => {
     carregarAnalise(Number(ev.target.value));
