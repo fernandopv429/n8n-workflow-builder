@@ -668,8 +668,13 @@ def _system_prompt(cliente: dict) -> str:
     )
 
 
-def _responder(cliente: dict, contato: dict, texto: str) -> str:
-    """Loop de tool-calling. Devolve o texto a enviar pro paciente."""
+def _responder(cliente: dict, contato: dict, texto: str, lead_kommo: dict | None = None) -> str:
+    """Loop de tool-calling. Devolve o texto a enviar pro paciente.
+
+    `lead_kommo`: já resolvido (cache local, populado pelo webhook do Kommo
+    ou por uma busca anterior — ver _lead_permite_ia/processar). Opcional:
+    sem Kommo configurado, ou lead ainda não encontrado, segue None e o
+    modelo busca sozinho como antes."""
     historico = db.listar_mensagens_agente(contato["id"], MAX_HISTORICO)
     mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
     mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in historico]
@@ -682,6 +687,21 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     ultima = historico[-1] if historico else None
     if texto and not (ultima and ultima["role"] == "user" and ultima["conteudo"] == texto):
         mensagens.append({"role": "user", "content": texto})
+
+    # Sem isto o modelo tem que descobrir o lead sozinho via ferramenta — e
+    # na falta de um jeito confiável de achar, já inventou o telefone do
+    # paciente como se fosse lead_id (02/11/2026, cliente "Dr Luciana").
+    # Entregando o ID pronto (quando já se sabe), essa tentação some.
+    if lead_kommo and lead_kommo.get("id"):
+        mensagens.append({
+            "role": "system",
+            "content": (
+                f"O lead deste contato no Kommo tem o ID {lead_kommo['id']}. Use "
+                "esse ID direto nas ferramentas do Kommo — não precisa buscar de "
+                "novo, e NUNCA use o telefone do paciente, 0, ou um status_id "
+                "como se fossem o lead_id."
+            ),
+        })
 
     ferramentas, mapa_mcp = _ferramentas_do_agente(cliente)
 
@@ -1088,7 +1108,11 @@ def processar(payload: dict) -> dict:
                 "mensagem_id": mensagem_id}
 
     db.salvar_mensagem_agente(contato["id"], "user", texto)
-    resposta = _responder(cliente, contato, texto)
+    # Leitura local só (sem ir ao Kommo de novo): se _lead_permite_ia já achou
+    # o lead pra esta mensagem, ficou em cache; se não tinha Kommo ou não
+    # achou, aqui é só um SELECT que devolve None — nunca atrasa a resposta.
+    lead_kommo = db.obter_lead_kommo(cliente_id, id_whatsapp)
+    resposta = _responder(cliente, contato, texto, lead_kommo)
     db.salvar_mensagem_agente(contato["id"], "assistant", resposta)
     return {
         "cliente_id": cliente_id,

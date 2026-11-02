@@ -1259,7 +1259,8 @@ def _com_cliente_openai_dublado(conteudo_resposta):
 
     class _Resposta:
         choices = [type("Escolha", (), {
-            "message": type("Msg", (), {"content": conteudo_resposta})()})]
+            "message": type("Msg", (), {"content": conteudo_resposta,
+                                        "tool_calls": None})()})]
 
     class _ChatDublado:
         def create(self, **kwargs):
@@ -1302,6 +1303,65 @@ def teste_gerar_follow_up_nao_insere_mensagem_de_user_falsa():
     assert mensagens[-1]["role"] == "system"
     assert "reengajar" not in mensagens[0]["content"]  # a instrução não é o prompt do cliente
     assert w.INSTRUCAO_FOLLOW_UP == mensagens[-1]["content"]
+
+
+def _com_responder_dublado(conteudo_resposta):
+    """_responder passa por _ferramentas_do_agente, que chama vários db.*
+    pra montar o catálogo (MCPs, Kommo, arquivos) — tudo dublado vazio/sem
+    Kommo, pra isolar só o que o teste quer checar: o que entra em
+    `messages`, não o catálogo de ferramentas em si."""
+    import db
+    import worker_agente as w
+    chamadas, original_openai = _com_cliente_openai_dublado(conteudo_resposta)
+    originais = {
+        "listar_mensagens_agente": db.listar_mensagens_agente,
+        "obter_credenciais_kommo": db.obter_credenciais_kommo,
+        "listar_mcps_do_cliente": db.listar_mcps_do_cliente,
+        "listar_midias_do_cliente": db.listar_midias_do_cliente,
+    }
+    db.listar_mensagens_agente = lambda *a: []
+    db.obter_credenciais_kommo = lambda *a: {}
+    db.listar_mcps_do_cliente = lambda *a, **kw: []
+    db.listar_midias_do_cliente = lambda *a: []
+    return chamadas, {**originais, "cliente_openai": original_openai}
+
+
+def _restaura_responder(originais):
+    import db
+    import worker_agente as w
+    w._cliente_openai = originais["cliente_openai"]
+    db.listar_mensagens_agente = originais["listar_mensagens_agente"]
+    db.obter_credenciais_kommo = originais["obter_credenciais_kommo"]
+    db.listar_mcps_do_cliente = originais["listar_mcps_do_cliente"]
+    db.listar_midias_do_cliente = originais["listar_midias_do_cliente"]
+
+
+def teste_responder_injeta_lead_id_quando_ja_resolvido():
+    """lead_kommo já resolvido (cache local) entra como mensagem de system
+    no final — é o que evita o modelo inventar um lead_id (02/11/2026,
+    cliente 'Dr Luciana': usou o telefone do paciente como se fosse
+    lead_id, numa tentativa de mover o lead sem saber o ID de verdade)."""
+    import worker_agente as w
+    chamadas, originais = _com_responder_dublado("ok")
+    try:
+        w._responder({"id": 1, "cliente_nome": "hh"}, {"id": 9}, "oi",
+                     lead_kommo={"id": 2394054, "tags": ["IA ATIVA"]})
+    finally:
+        _restaura_responder(originais)
+    mensagens = chamadas[0]["messages"]
+    assert mensagens[-1]["role"] == "system"
+    assert "2394054" in mensagens[-1]["content"]
+
+
+def teste_responder_sem_lead_kommo_nao_injeta_nada():
+    import worker_agente as w
+    chamadas, originais = _com_responder_dublado("ok")
+    try:
+        w._responder({"id": 1, "cliente_nome": "hh"}, {"id": 9}, "oi", lead_kommo=None)
+    finally:
+        _restaura_responder(originais)
+    mensagens = chamadas[0]["messages"]
+    assert [m["role"] for m in mensagens] == ["system", "user"]
 
 
 def _com_follow_up_dublado():
@@ -1788,6 +1848,8 @@ TESTES = [
     teste_chamar_humano_grava_evento_e_nao_mexe_no_kommo_sem_lead_id,
     teste_chamar_humano_marca_tag_quando_tem_lead_id_e_credencial,
     teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff,
+    teste_responder_injeta_lead_id_quando_ja_resolvido,
+    teste_responder_sem_lead_kommo_nao_injeta_nada,
     teste_gerar_follow_up_nao_insere_mensagem_de_user_falsa,
     teste_processar_follow_up_respeita_gating_do_kommo,
     teste_processar_follow_up_envia_salva_e_marca,
