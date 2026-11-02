@@ -970,7 +970,7 @@ def teste_telefone_e_tags_do_lead_sem_contato_devolve_telefone_vazio():
     assert json.loads(r) == {"telefone": "", "tags": [], "status_id": None, "pipeline_id": None}
 
 
-def _handler_kommo_dublado(telefone_e_tags, obter_anterior):
+def _handler_kommo_dublado(telefone_e_tags, obter_anterior, existe_contato=True):
     """Instância de servidor.Handler sem passar pelo __init__ do
     BaseHTTPRequestHandler (que exige socket de verdade) — válido porque
     `_processar_lead_kommo` só usa `self` como ligação do método, nunca lê
@@ -987,6 +987,7 @@ def _handler_kommo_dublado(telefone_e_tags, obter_anterior):
         "salvar": db.salvar_lead_kommo,
         "evento": db.registrar_evento_lead_kommo,
         "log": db.registrar_log,
+        "existe_contato": db.existe_contato,
     }
     kommo_cartao.telefone_e_tags_do_lead = telefone_e_tags
     kommo_cartao.adicionar_tag = lambda *a: (
@@ -995,6 +996,7 @@ def _handler_kommo_dublado(telefone_e_tags, obter_anterior):
     db.salvar_lead_kommo = lambda *a: chamadas.append(("salvar", a))
     db.registrar_evento_lead_kommo = lambda *a: chamadas.append(("evento", a))
     db.registrar_log = lambda *a: chamadas.append(("log", a))
+    db.existe_contato = lambda *a: existe_contato
     handler = object.__new__(servidor.Handler)
     return handler, chamadas, originais
 
@@ -1008,6 +1010,7 @@ def _restaura_handler_kommo(originais):
     db.salvar_lead_kommo = originais["salvar"]
     db.registrar_evento_lead_kommo = originais["evento"]
     db.registrar_log = originais["log"]
+    db.existe_contato = originais["existe_contato"]
 
 
 def teste_processar_lead_kommo_novo_provisiona_e_registra_criado():
@@ -1087,6 +1090,22 @@ def teste_processar_lead_kommo_sem_telefone_nao_registra_nada():
     finally:
         _restaura_handler_kommo(originais)
     assert not any(c[0] in ("evento", "salvar", "tag") for c in chamadas), chamadas
+
+
+def teste_processar_lead_kommo_sem_contato_na_base_ignora():
+    """Uma conta Kommo serve vários funis, não só o do WhatsApp — lead cujo
+    telefone nunca falou com a IA não pode ser tagueado nem virar evento."""
+    handler, chamadas, originais = _handler_kommo_dublado(
+        telefone_e_tags=lambda *a: json.dumps({
+            "telefone": "5511999999999", "tags": [], "status_id": 1, "pipeline_id": 2}),
+        obter_anterior=lambda *a: None,
+        existe_contato=False,
+    )
+    try:
+        handler._processar_lead_kommo(1, {"kommo_domain": "c", "access_token": "t"}, "99")
+    finally:
+        _restaura_handler_kommo(originais)
+    assert not any(c[0] in ("evento", "salvar", "tag", "log") for c in chamadas), chamadas
 
 
 def teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao():
@@ -1631,6 +1650,7 @@ TESTES = [
     teste_processar_lead_kommo_tag_mudou_registra_mudou,
     teste_processar_lead_kommo_etapa_mudou_registra_mudou,
     teste_processar_lead_kommo_sem_telefone_nao_registra_nada,
+    teste_processar_lead_kommo_sem_contato_na_base_ignora,
     teste_ferramentas_kommo_cartao_do_worker_batem_com_kommo_cartao,
     teste_executar_kommo_cartao_ignora_credencial_do_modelo,
     teste_executar_kommo_cartao_sem_credencial_nao_chama_o_kommo,

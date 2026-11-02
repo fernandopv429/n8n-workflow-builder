@@ -245,6 +245,13 @@ class Handler(BaseHTTPRequestHandler):
                              f"[webhook kommo] lead {lead_id} sem telefone cadastrado no "
                              "contato — não dá pra ligar a um contato do WhatsApp.")
             return
+        if not db.existe_contato(cliente_id, telefone):
+            # Uma conta Kommo normalmente serve vários funis, não só o do
+            # WhatsApp — processar (e marcar tag em) um lead cujo telefone
+            # nunca falou com a IA mexeria em gente fora do nosso escopo. Sem
+            # log: pro cliente com Kommo bem movimentado isso é o caso comum,
+            # não uma falha (01/11/2026, a pedido do Fernando).
+            return
 
         anterior = db.obter_lead_kommo_por_id(cliente_id, lead_id)
         if anterior is None:

@@ -431,6 +431,20 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
     return dict(zip(campos, linha))
 
 
+def existe_contato(cliente_id: int, id_whatsapp: str) -> bool:
+    """Só olha se o telefone já tem conversa iniciada neste cliente — nunca
+    cria. Usado pelo recebedor do webhook do Kommo (servidor.py): uma conta
+    Kommo normalmente tem leads de vários funis, não só os que um dia vão
+    falar com a IA pelo WhatsApp — processar um lead cujo telefone nunca
+    apareceu aqui marcaria/tagueraria gente fora do nosso funil."""
+    with _conectar() as conn:
+        linha = conn.execute(
+            "SELECT 1 FROM contatos WHERE cliente_id = %s AND id_whatsapp = %s",
+            (cliente_id, id_whatsapp),
+        ).fetchone()
+    return linha is not None
+
+
 def definir_prompt(cliente_id: int, texto: str):
     """Grava o prompt do agente escrito à mão.
 
