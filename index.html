@@ -1538,6 +1538,61 @@ function _barraAnalise(h, maxSegundos) {
     </div>`;
 }
 
+// Tendência diária de tempo de resposta — linha, não barra: aqui o que
+// importa é a direção ao longo do tempo (melhorando/piorando), diferente
+// da lista de handoffs individuais (um evento de cada vez, isso sim é
+// ranking/log, por isso continua como barra). Dia sem handoff resolvido
+// vira uma LACUNA de verdade na linha (não interpola, não vira zero —
+// zero pareceria "resposta instantânea").
+function _graficoLinha(pontos) {
+  const comDado = pontos.filter(p => p.media_segundos !== null);
+  if (comDado.length < 2) {
+    return '<p class="opcional">dado insuficiente pra uma tendência nesse período.</p>';
+  }
+  const L = 600, A = 180, PAD_E = 42, PAD_D = 10, PAD_C = 10, PAD_B = 24;
+  const n = pontos.length;
+  const maxSeg = Math.max(...comDado.map(p => p.media_segundos));
+  const x = i => PAD_E + (n <= 1 ? 0 : (i / (n - 1)) * (L - PAD_E - PAD_D));
+  const y = seg => A - PAD_B - (maxSeg <= 0 ? 0 : (seg / maxSeg) * (A - PAD_B - PAD_C));
+
+  const segmentos = [];
+  let atual = [];
+  pontos.forEach((p, i) => {
+    if (p.media_segundos === null) {
+      if (atual.length) segmentos.push(atual);
+      atual = [];
+    } else {
+      atual.push([i, p]);
+    }
+  });
+  if (atual.length) segmentos.push(atual);
+
+  const caminhos = segmentos.map(seg => `<path d="${
+    seg.map(([i, p], k) => `${k === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.media_segundos).toFixed(1)}`).join(' ')
+  }" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join('');
+
+  const pontosSvg = pontos.map((p, i) => {
+    if (p.media_segundos === null) return '';
+    const dataFmt = new Date(p.dia + 'T00:00:00').toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'});
+    const titulo = `${dataFmt}: ${_formatarDuracao(p.media_segundos)} (${p.quantidade} resposta${p.quantidade === 1 ? '' : 's'})`;
+    return `<circle cx="${x(i).toFixed(1)}" cy="${y(p.media_segundos).toFixed(1)}" r="3.5"
+      fill="var(--accent)" stroke="var(--bg)" stroke-width="2"><title>${escaparHtml(titulo)}</title></circle>`;
+  }).join('');
+
+  const primeiro = new Date(pontos[0].dia + 'T00:00:00').toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'});
+  const ultimo = new Date(pontos[n - 1].dia + 'T00:00:00').toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'});
+
+  return `
+    <svg viewBox="0 0 ${L} ${A}" style="width:100%;height:auto;display:block">
+      <text x="${PAD_E - 6}" y="${A - PAD_B + 4}" text-anchor="end" font-size="10" fill="var(--muted)">0</text>
+      <text x="${PAD_E - 6}" y="${PAD_C + 8}" text-anchor="end" font-size="10" fill="var(--muted)">${_formatarDuracao(maxSeg)}</text>
+      <line x1="${PAD_E}" y1="${A - PAD_B}" x2="${L - PAD_D}" y2="${A - PAD_B}" stroke="var(--border)" stroke-width="1"/>
+      ${caminhos}${pontosSvg}
+      <text x="${x(0).toFixed(1)}" y="${A - 6}" text-anchor="start" font-size="10" fill="var(--muted)">${primeiro}</text>
+      <text x="${x(n - 1).toFixed(1)}" y="${A - 6}" text-anchor="end" font-size="10" fill="var(--muted)">${ultimo}</text>
+    </svg>`;
+}
+
 async function carregarAnalise(dias) {
   dias = dias || 30;
   const caixa = document.getElementById('analise-conteudo');
@@ -1569,6 +1624,10 @@ async function carregarAnalise(dias) {
       <span class="opcional">${d.atendimentos || 0} atendimento(s) no período</span>
     </div>
     ${handoffs.length ? `
+      <div class="mini-grafico">
+        <h4>Tempo médio de resposta por dia</h4>
+        ${_graficoLinha(d.tendencia_diaria || [])}
+      </div>
       <div class="legenda-analise">
         <span><i style="background:var(--accent)"></i>tempo até resposta humana</span>
         <span><i style="background:var(--err)"></i>ainda sem resposta</span>

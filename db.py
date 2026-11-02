@@ -816,6 +816,42 @@ def relatorio_atendimento(cliente_id: int, dias: int = 30) -> dict:
             (cliente_id, dias),
         ).fetchall()
 
+        # Tendência diária (01/11/2026, a pedido do Fernando): a lista de
+        # handoffs acima é por evento, boa pra auditar um caso específico,
+        # mas não diz se o atendimento tá melhorando ou piorando com o
+        # tempo — pra isso precisa de média por dia. `generate_series` dá o
+        # dia mesmo sem handoff nenhum (LEFT JOIN): dia sem dado vira
+        # `media_segundos = None`, e quem desenha o gráfico decide mostrar
+        # como lacuna de verdade, não como zero (zero pareceria "resposta
+        # instantânea", que é outra informação).
+        tendencia = conn.execute(
+            """
+            WITH dias AS (
+                SELECT generate_series(
+                    (now() - make_interval(days => %s))::date, now()::date, interval '1 day'
+                )::date AS dia
+            ),
+            resolvidos AS (
+                SELECT h.criado_em::date AS dia,
+                       EXTRACT(EPOCH FROM (r.criado_em - h.criado_em)) AS segundos
+                  FROM eventos_atendimento h
+                  JOIN contatos c ON c.id = h.contato_id
+                  JOIN LATERAL (
+                      SELECT criado_em FROM eventos_atendimento
+                       WHERE contato_id = h.contato_id AND tipo = 'humano_respondeu'
+                         AND criado_em > h.criado_em
+                       ORDER BY criado_em LIMIT 1
+                  ) r ON TRUE
+                 WHERE c.cliente_id = %s AND h.tipo = 'handoff_solicitado'
+                   AND h.criado_em >= now() - make_interval(days => %s)
+            )
+            SELECT d.dia, avg(res.segundos)::int AS media_segundos, count(res.segundos) AS quantidade
+              FROM dias d LEFT JOIN resolvidos res ON res.dia = d.dia
+             GROUP BY d.dia ORDER BY d.dia
+            """,
+            (dias, cliente_id, dias),
+        ).fetchall()
+
     campos = ("contato_id", "nome", "id_whatsapp", "motivo", "handoff_em",
               "resposta_em", "tempo_resposta_segundos")
     return {
@@ -825,6 +861,10 @@ def relatorio_atendimento(cliente_id: int, dias: int = 30) -> dict:
              "handoff_em": h[4].isoformat() if h[4] else None,
              "resposta_em": h[5].isoformat() if h[5] else None}
             for h in handoffs
+        ],
+        "tendencia_diaria": [
+            {"dia": t[0].isoformat(), "media_segundos": t[1], "quantidade": t[2]}
+            for t in tendencia
         ],
     }
 
