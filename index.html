@@ -134,7 +134,7 @@
   .barra-analise-trilho { flex: 1; height: 20px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
   .barra-analise-fill { height: 100%; border-radius: 3px; }
-  .barra-analise-valor { flex: 0 0 120px; font-size: 12px; color: var(--muted); text-align: right; }
+  .barra-analise-valor { flex: 0 0 170px; font-size: 12px; color: var(--muted); text-align: right; }
   .legenda-analise { display: flex; gap: 16px; font-size: 12px; color: var(--muted);
     margin-bottom: 14px; }
   .legenda-analise span { display: inline-flex; align-items: center; gap: 6px; }
@@ -1014,6 +1014,24 @@ async function abrirMetricas() {
   await carregarMetricas();
 }
 
+function _barraMetrica(m, maxChamadas) {
+  const nome = escaparHtml(m.ferramenta);
+  const origem = escaparHtml(m.origem);
+  const erro = m.taxa_erro_pct || 0;
+  const pct = Math.max(4, Math.round((m.chamadas / maxChamadas) * 100));
+  // Erro alto chama atenção na cor — é a ferramenta que tá chamando MUITO
+  // e falhando que mais importa achar, não só a mais chamada.
+  const cor = erro >= 10 ? 'var(--err)' : 'var(--accent)';
+  return `
+    <div class="barra-analise" title="origem: ${origem}">
+      <div class="barra-analise-nome">${nome}</div>
+      <div class="barra-analise-trilho">
+        <div class="barra-analise-fill" style="width:${pct}%;background:${cor}"></div>
+      </div>
+      <div class="barra-analise-valor">${m.chamadas}x · ${m.duracao_media_ms}ms · ${erro}% erro</div>
+    </div>`;
+}
+
 async function carregarMetricas(dias) {
   dias = dias || 7;
   const caixa = document.getElementById('metricas-conteudo');
@@ -1023,20 +1041,15 @@ async function carregarMetricas(dias) {
     dados = (await (await fetch(`/metricas/${dias}`)).json()).metricas || [];
   } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
 
-  const linhas = dados.map(m => `
-    <tr>
-      <td>${escaparHtml(m.ferramenta)}</td>
-      <td>${escaparHtml(m.origem)}</td>
-      <td style="text-align:right">${m.chamadas}</td>
-      <td style="text-align:right">${m.duracao_media_ms} ms</td>
-      <td style="text-align:right">${m.taxa_erro_pct}%</td>
-    </tr>`).join('');
+  const maxChamadas = Math.max(1, ...dados.map(m => m.chamadas));
+  const barras = dados.map(m => _barraMetrica(m, maxChamadas)).join('');
 
   caixa.innerHTML = `
     <p class="hint">Quantas vezes cada ferramenta foi chamada, quanto demora e
       quanto falha — no agente que fala com o paciente, no chat de
       gerenciamento e no agente geral. Ordenado pelas mais chamadas: é onde
-      cache ou tirar do MCP rende mais.</p>
+      cache ou tirar do MCP rende mais. Barra vermelha = taxa de erro alta
+      (10% ou mais).</p>
     <div class="linha" style="gap:8px; margin-bottom:12px">
       <label for="metricas-periodo">Período:</label>
       <select id="metricas-periodo">
@@ -1045,10 +1058,7 @@ async function carregarMetricas(dias) {
         <option value="30"${dias === 30 ? ' selected' : ''}>últimos 30 dias</option>
       </select>
     </div>
-    <table class="tabela-consumo">
-      <thead><tr><th>ferramenta</th><th>origem</th><th>chamadas</th><th>tempo médio</th><th>taxa de erro</th></tr></thead>
-      <tbody>${linhas || '<tr><td colspan="5">nenhuma chamada registrada nesse período.</td></tr>'}</tbody>
-    </table>`;
+    ${barras || '<p class="opcional">nenhuma chamada registrada nesse período.</p>'}`;
 
   document.getElementById('metricas-periodo').addEventListener('change', (ev) => {
     carregarMetricas(Number(ev.target.value));
