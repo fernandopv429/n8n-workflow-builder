@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0a0a0c; --card: #16161a; --border: #232327; --text: #e4e4e7;
-    --muted: #86868f; --accent: #8b5cf6; --err: #ef4444;
+    --muted: #86868f; --accent: #8b5cf6; --err: #ef4444; --warn: #f59e0b;
   }
   * { box-sizing: border-box; }
   body {
@@ -133,12 +133,16 @@
     text-overflow: ellipsis; white-space: nowrap; }
   .barra-analise-trilho { flex: 1; height: 20px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-  .barra-analise-fill { height: 100%; border-radius: 3px; }
+  .barra-analise-fill { height: 100%; border-radius: 0 4px 4px 0; }
   .barra-analise-valor { flex: 0 0 170px; font-size: 12px; color: var(--muted); text-align: right; }
   .legenda-analise { display: flex; gap: 16px; font-size: 12px; color: var(--muted);
     margin-bottom: 14px; }
   .legenda-analise span { display: inline-flex; align-items: center; gap: 6px; }
   .legenda-analise i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  .mini-grafico { margin-bottom: 24px; }
+  .mini-grafico h4 { margin: 0 0 10px; font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; }
 
   .abas { display: flex; gap: 2px; flex-wrap: wrap; flex: 1; }
   .aba {
@@ -1014,22 +1018,33 @@ async function abrirMetricas() {
   await carregarMetricas();
 }
 
-function _barraMetrica(m, maxChamadas) {
-  const nome = escaparHtml(m.ferramenta);
-  const origem = escaparHtml(m.origem);
+// Um painel por métrica, cada um com a própria escala — chamadas (contagem),
+// tempo médio (ms) e taxa de erro (%) não têm a mesma unidade, então uma
+// barra só tentando mostrar as três ao mesmo tempo (tamanho = uma métrica,
+// cor = outra, texto = a terceira) confundia mais do que ajudava. Virou
+// "pequenos múltiplos": 3 rankings de barra, um eixo cada.
+function _painelMetrica(titulo, itens, campo, formatar, corDe, legenda) {
+  const maxValor = Math.max(1, ...itens.map(m => m[campo]));
+  const linhas = itens.slice(0, 8).map(m => {
+    const pct = Math.max(4, Math.round((m[campo] / maxValor) * 100));
+    return `
+      <div class="barra-analise" title="origem: ${escaparHtml(m.origem)}">
+        <div class="barra-analise-nome">${escaparHtml(m.ferramenta)}</div>
+        <div class="barra-analise-trilho">
+          <div class="barra-analise-fill" style="width:${pct}%;background:${corDe(m)}"></div>
+        </div>
+        <div class="barra-analise-valor">${formatar(m)}</div>
+      </div>`;
+  }).join('');
+  return `<div class="mini-grafico"><h4>${titulo}</h4>${legenda || ''}${
+    linhas || '<p class="opcional">sem dados.</p>'}</div>`;
+}
+
+function _corTaxaErro(m) {
   const erro = m.taxa_erro_pct || 0;
-  const pct = Math.max(4, Math.round((m.chamadas / maxChamadas) * 100));
-  // Erro alto chama atenção na cor — é a ferramenta que tá chamando MUITO
-  // e falhando que mais importa achar, não só a mais chamada.
-  const cor = erro >= 10 ? 'var(--err)' : 'var(--accent)';
-  return `
-    <div class="barra-analise" title="origem: ${origem}">
-      <div class="barra-analise-nome">${nome}</div>
-      <div class="barra-analise-trilho">
-        <div class="barra-analise-fill" style="width:${pct}%;background:${cor}"></div>
-      </div>
-      <div class="barra-analise-valor">${m.chamadas}x · ${m.duracao_media_ms}ms · ${erro}% erro</div>
-    </div>`;
+  if (erro >= 15) return 'var(--err)';
+  if (erro >= 5) return 'var(--warn)';
+  return 'var(--muted)';
 }
 
 async function carregarMetricas(dias) {
@@ -1041,16 +1056,32 @@ async function carregarMetricas(dias) {
     dados = (await (await fetch(`/metricas/${dias}`)).json()).metricas || [];
   } catch (e) { caixa.textContent = 'falha ao consultar.'; return; }
 
-  const maxChamadas = Math.max(1, ...dados.map(m => m.chamadas));
-  const barras = dados.map(m => _barraMetrica(m, maxChamadas)).join('');
+  const porChamadas = [...dados].sort((a, b) => b.chamadas - a.chamadas);
+  const porDuracao = [...dados].sort((a, b) => b.duracao_media_ms - a.duracao_media_ms);
+  const porErro = [...dados].sort((a, b) => b.taxa_erro_pct - a.taxa_erro_pct);
+
+  const legendaErro = `
+    <div class="legenda-analise">
+      <span><i style="background:var(--muted)"></i>abaixo de 5%</span>
+      <span><i style="background:var(--warn)"></i>5% a 15%</span>
+      <span><i style="background:var(--err)"></i>15% ou mais</span>
+    </div>`;
+
+  const paineis = dados.length ? `
+    ${_painelMetrica('Mais chamadas', porChamadas, 'chamadas',
+                     m => `${m.chamadas}x`, () => 'var(--accent)')}
+    ${_painelMetrica('Mais lentas (tempo médio)', porDuracao, 'duracao_media_ms',
+                     m => `${m.duracao_media_ms} ms`, () => 'var(--accent)')}
+    ${_painelMetrica('Maior taxa de erro', porErro, 'taxa_erro_pct',
+                     m => `${m.taxa_erro_pct}% de erro`, _corTaxaErro, legendaErro)}
+  ` : '<p class="opcional">nenhuma chamada registrada nesse período.</p>';
 
   caixa.innerHTML = `
     <p class="hint">Quantas vezes cada ferramenta foi chamada, quanto demora e
       quanto falha — no agente que fala com o paciente, no chat de
-      gerenciamento e no agente geral. Ordenado pelas mais chamadas: é onde
-      cache ou tirar do MCP rende mais. Barra vermelha = taxa de erro alta
-      (10% ou mais).</p>
-    <div class="linha" style="gap:8px; margin-bottom:12px">
+      gerenciamento e no agente geral. Cada painel ranqueia por uma métrica
+      (até as 8 primeiras); é onde cache ou tirar do MCP rende mais.</p>
+    <div class="linha" style="gap:8px; margin-bottom:16px">
       <label for="metricas-periodo">Período:</label>
       <select id="metricas-periodo">
         <option value="1"${dias === 1 ? ' selected' : ''}>último dia</option>
@@ -1058,7 +1089,7 @@ async function carregarMetricas(dias) {
         <option value="30"${dias === 30 ? ' selected' : ''}>últimos 30 dias</option>
       </select>
     </div>
-    ${barras || '<p class="opcional">nenhuma chamada registrada nesse período.</p>'}`;
+    ${paineis}`;
 
   document.getElementById('metricas-periodo').addEventListener('change', (ev) => {
     carregarMetricas(Number(ev.target.value));
