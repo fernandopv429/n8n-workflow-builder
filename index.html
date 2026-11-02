@@ -934,6 +934,15 @@ async function carregarWhatsapp() {
         : 'as mensagens continuam sendo guardadas, mas ninguém responde'}</span>
       <button type="button" class="handoff-botao" id="btn-liga-agente">
         ${ativo ? 'Desligar' : 'Ligar'}</button>
+    </div>
+    <div class="interruptor" style="margin-top:8px">
+      <strong>Follow-up automático</strong>
+      <span class="opcional">se o paciente não responder depois de uma mensagem
+        da IA, ela tenta reengajar uma vez, sozinha</span>
+      <input type="number" id="follow-up-horas" min="0" step="1" style="width:70px"
+             placeholder="horas" value="${cli.follow_up_horas || ''}">
+      <span class="opcional">horas sem resposta (0 ou vazio desliga)</span>
+      <button type="button" class="handoff-botao" id="btn-salvar-follow-up">Salvar</button>
     </div>`;
 
   if (d.status === 'nao configurada') {
@@ -961,6 +970,17 @@ async function carregarWhatsapp() {
     await fetch(`/clientes/${clienteAtualId}/ativo`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ativo: !ativo }),
+    });
+    carregarLogs();
+    carregarWhatsapp();
+  });
+
+  document.getElementById('btn-salvar-follow-up').addEventListener('click', async (ev) => {
+    const b = ev.target; b.disabled = true;
+    const horas = Number(document.getElementById('follow-up-horas').value) || 0;
+    await fetch(`/clientes/${clienteAtualId}/follow-up`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ horas }),
     });
     carregarLogs();
     carregarWhatsapp();

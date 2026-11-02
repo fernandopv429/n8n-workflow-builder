@@ -237,8 +237,8 @@ def garantir_schema():
         # Substitui a tabela `clientes_<nome>` do Supabase, que era UMA POR
         # CLIENTE — o mesmo vício do clone, com DDL a cada cliente novo. Aqui é
         # uma tabela só, com cliente_id. Colunas espelham as que os workflows
-        # realmente usam: id_whatsapp, nome, status ('HUMANO' no handoff),
-        # ultima_mensagem e repondeu_follow.
+        # realmente usam: id_whatsapp, nome, status ('HUMANO' no handoff) e
+        # ultima_mensagem.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS contatos (
                 id SERIAL PRIMARY KEY,
@@ -247,12 +247,16 @@ def garantir_schema():
                 nome TEXT,
                 status TEXT NOT NULL DEFAULT 'IA'
                     CHECK (status IN ('IA', 'HUMANO')),
-                respondeu_follow BOOLEAN NOT NULL DEFAULT FALSE,
                 ultima_mensagem TIMESTAMPTZ,
                 criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
                 UNIQUE (cliente_id, id_whatsapp)
             )
         """)
+        # `respondeu_follow` nasceu em 02/10/2026 espelhando um campo do n8n
+        # antigo, mas nunca foi lido nem escrito por código nenhum — morto
+        # desde que nasceu. Sai pra dar lugar ao campo de verdade do
+        # follow-up agendado, logo abaixo.
+        conn.execute("ALTER TABLE contatos DROP COLUMN IF EXISTS respondeu_follow")
         # Memória da conversa, por contato. Separada de chat_mensagens, que é o
         # chat do PAINEL (operador conversando sobre o cliente) — misturar os
         # dois faria o agente responder ao paciente com contexto de manutenção.
@@ -397,6 +401,15 @@ def garantir_schema():
             "CREATE INDEX IF NOT EXISTS idx_kommo_lead_eventos_lead "
             "ON kommo_lead_eventos (cliente_id, lead_id, criado_em)"
         )
+        # Follow-up agendado (02/11/2026, a pedido do Fernando): se o paciente
+        # para de responder depois de uma mensagem da IA, tenta reengajar
+        # sozinho — tempo de espera configurável POR CLIENTE (0/vazio desliga
+        # a funcionalidade pra ele). `follow_up_enviado_em` marca que já
+        # mandou um follow-up nesta janela de silêncio (não manda dois);
+        # volta a NULL sozinho assim que o paciente manda mensagem de novo
+        # (ver obter_ou_criar_contato).
+        conn.execute("ALTER TABLE contatos ADD COLUMN IF NOT EXISTS follow_up_enviado_em TIMESTAMPTZ")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS follow_up_horas INTEGER")
 
 
 # --- estado do agente de atendimento ------------------------------------
@@ -412,6 +425,11 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
     primeira mensagem de verdade deste contato, sem outra consulta, pra
     decidir se tenta provisionar a tag IA ATIVA no Kommo (ver
     worker_agente.py:_provisionar_tag_ia_ativa).
+
+    `follow_up_enviado_em` volta a NULL em TODA mensagem nova (não só na
+    primeira) — é o sinal de "o paciente voltou a falar", que reabre a
+    chance de um follow-up futuro na próxima vez que ele ficar quieto
+    (ver contatos_elegiveis_para_follow_up).
     """
     with _conectar() as conn:
         linha = conn.execute(
@@ -420,14 +438,14 @@ def obter_ou_criar_contato(cliente_id: int, id_whatsapp: str, nome: str = "") ->
             VALUES (%s, %s, NULLIF(%s, ''), now())
             ON CONFLICT (cliente_id, id_whatsapp) DO UPDATE
                 SET ultima_mensagem = now(),
-                    nome = COALESCE(contatos.nome, EXCLUDED.nome)
-            RETURNING id, cliente_id, id_whatsapp, nome, status, respondeu_follow,
+                    nome = COALESCE(contatos.nome, EXCLUDED.nome),
+                    follow_up_enviado_em = NULL
+            RETURNING id, cliente_id, id_whatsapp, nome, status,
                       (xmax = 0) AS criado_agora
             """,
             (cliente_id, id_whatsapp, nome or ""),
         ).fetchone()
-    campos = ("id", "cliente_id", "id_whatsapp", "nome", "status", "respondeu_follow",
-              "criado_agora")
+    campos = ("id", "cliente_id", "id_whatsapp", "nome", "status", "criado_agora")
     return dict(zip(campos, linha))
 
 
@@ -1283,6 +1301,54 @@ def definir_agente_ativo(cliente_id: int, ativo: bool):
             "UPDATE clientes SET agente_ativo = %s, atualizado_em = now() WHERE id = %s",
             (bool(ativo), cliente_id),
         )
+
+
+def definir_follow_up_horas(cliente_id: int, horas: int):
+    """0 (ou None) desliga o follow-up agendado pra este cliente — é assim
+    que `contatos_elegiveis_para_follow_up` nunca o escolhe."""
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE clientes SET follow_up_horas = NULLIF(%s, 0), atualizado_em = now() "
+            "WHERE id = %s",
+            (int(horas or 0), cliente_id),
+        )
+
+
+def marcar_follow_up_enviado(contato_id: int):
+    with _conectar() as conn:
+        conn.execute(
+            "UPDATE contatos SET follow_up_enviado_em = now() WHERE id = %s",
+            (contato_id,),
+        )
+
+
+def contatos_elegiveis_para_follow_up() -> list:
+    """Contato parado: a ÚLTIMA mensagem da conversa foi da IA (o paciente
+    não respondeu depois dela — diferente de nunca ter respondido nada),
+    já passou do tempo configurado pro cliente, o agente tá ligado, o
+    contato tá em atendimento automático, e ainda não mandamos um follow-up
+    nesta janela de silêncio. Cliente com `follow_up_horas` nulo/zero nunca
+    aparece aqui — é como desligar a funcionalidade pra ele."""
+    with _conectar() as conn:
+        linhas = conn.execute(
+            """
+            SELECT c.id, c.cliente_id, c.id_whatsapp, c.nome, c.status
+              FROM contatos c
+              JOIN clientes cl ON cl.id = c.cliente_id
+              JOIN LATERAL (
+                  SELECT role, criado_em FROM agente_mensagens
+                   WHERE contato_id = c.id ORDER BY criado_em DESC LIMIT 1
+              ) ultima ON TRUE
+             WHERE cl.follow_up_horas IS NOT NULL AND cl.follow_up_horas > 0
+               AND cl.agente_ativo
+               AND c.status = 'IA'
+               AND c.follow_up_enviado_em IS NULL
+               AND ultima.role = 'assistant'
+               AND ultima.criado_em <= now() - make_interval(hours => cl.follow_up_horas)
+            """
+        ).fetchall()
+    campos = ("id", "cliente_id", "id_whatsapp", "nome", "status")
+    return [dict(zip(campos, l)) for l in linhas]
 
 
 def definir_instancia_evolution(cliente_id: int, instancia: str):

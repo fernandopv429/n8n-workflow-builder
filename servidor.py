@@ -106,6 +106,13 @@ ROTA_CLIENTE_RESTAURAR_PROMPT = re.compile(r"^/clientes/(\d+)/restaurar-prompt$"
 ROTA_CLIENTE_WHATSAPP = re.compile(r"^/clientes/(\d+)/whatsapp$")
 ROTA_CLIENTE_WHATSAPP_DESCONECTAR = re.compile(r"^/clientes/(\d+)/whatsapp/desconectar$")
 ROTA_CLIENTE_ATIVO = re.compile(r"^/clientes/(\d+)/ativo$")
+# Follow-up agendado: se o paciente para de responder depois de uma mensagem
+# da IA, ela tenta reengajar sozinha — tempo de espera configurável por
+# cliente (ver db.contatos_elegiveis_para_follow_up). /follow-up/rodar-todos
+# existe pra já deixar pronto o alvo de um Schedule Trigger do n8n, mesmo
+# padrão do QA e do resumo de atendimento.
+ROTA_CLIENTE_FOLLOW_UP = re.compile(r"^/clientes/(\d+)/follow-up$")
+ROTA_FOLLOW_UP_RODAR_TODOS = re.compile(r"^/follow-up/rodar-todos$")
 # Resumo periódico de atendimento, mandado num grupo do WhatsApp por cliente
 # (quem dispara o envio é um Schedule Trigger no n8n, chamando estas rotas).
 ROTA_CLIENTE_GRUPO_AVISO = re.compile(r"^/clientes/(\d+)/grupo-aviso$")
@@ -965,6 +972,28 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(200, total)
             return
 
+        if ROTA_FOLLOW_UP_RODAR_TODOS.match(self.path):
+            enviados, falhas = [], 0
+            for c in db.contatos_elegiveis_para_follow_up():
+                cliente = db.obter_cliente(c["cliente_id"])
+                if not cliente:
+                    continue
+                try:
+                    saida = worker_agente.processar_follow_up(cliente, c)
+                except Exception as e:  # noqa: BLE001 — um contato falhando não trava os outros
+                    falhas += 1
+                    db.registrar_log(c["cliente_id"], "erro",
+                                     f"[follow-up] falha ao reengajar {c['id_whatsapp']}: {e}")
+                    continue
+                if saida:
+                    enviados.append({"cliente_id": c["cliente_id"], "id_whatsapp": c["id_whatsapp"]})
+                    db.registrar_log(
+                        c["cliente_id"], "sistema",
+                        f"[follow-up] mensagem de reengajamento enviada pra {c['id_whatsapp']}.")
+            self._responder_json(200, {"enviados": len(enviados), "falhas": falhas,
+                                       "detalhe": enviados})
+            return
+
         m = ROTA_CLIENTE_QA_SUGERIR_MELHORIA.match(self.path)
         if m:
             cliente_id = int(m.group(1))
@@ -1272,6 +1301,22 @@ class Handler(BaseHTTPRequestHandler):
                 else "Agente DESLIGADO — mensagens continuam sendo guardadas, "
                      "mas ninguém responde até religar.")
             self._responder_json(200, {"ativo": ativo})
+            return
+
+        m = ROTA_CLIENTE_FOLLOW_UP.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            horas = int(self._ler_corpo().get("horas") or 0)
+            db.definir_follow_up_horas(cliente_id, horas)
+            db.registrar_log(
+                cliente_id, "sistema",
+                f"Follow-up automático ligado — reengaja depois de {horas}h sem resposta."
+                if horas > 0 else
+                "Follow-up automático desligado.")
+            self._responder_json(200, {"horas": horas or None})
             return
 
         m = ROTA_CLIENTE_GRUPO_AVISO.match(self.path)

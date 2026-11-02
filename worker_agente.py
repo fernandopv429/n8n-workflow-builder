@@ -731,6 +731,86 @@ def _responder(cliente: dict, contato: dict, texto: str) -> str:
     return "Não consegui concluir agora — já pedi ajuda de um atendente."
 
 
+# Follow-up agendado (02/11/2026, a pedido do Fernando): diferente de
+# _responder, aqui não tem mensagem nova do paciente — ele é quem ficou
+# calado. Por isso NÃO insere uma mensagem de "user" falsa no histórico (isso
+# apareceria na conversa como se o paciente tivesse escrito algo que ele não
+# escreveu); a instrução de reengajar entra como uma mensagem de "system" no
+# final, só pra esta chamada. Sem ferramentas: é só retomar a conversa com
+# texto, não uma rodada de atendimento completa.
+INSTRUCAO_FOLLOW_UP = (
+    "O paciente não respondeu há um tempo, depois da sua última mensagem. "
+    "Mande AGORA uma mensagem curta e natural tentando retomar a conversa — "
+    "sem repetir o que você já disse, sem soar robótico, e sem fazer uma "
+    "pergunta genérica tipo 'ainda precisa de ajuda?' se já havia um assunto "
+    "específico em andamento (nesse caso, retome esse assunto, não o assunto "
+    "em geral). Responda só com a mensagem a enviar, nada mais."
+)
+
+
+def gerar_follow_up(cliente: dict, contato: dict) -> str:
+    """Gera o texto de reengajamento, no mesmo tom/persona do agente."""
+    historico = db.listar_mensagens_agente(contato["id"], MAX_HISTORICO)
+    mensagens = [{"role": "system", "content": _system_prompt(cliente)}]
+    mensagens += [{"role": m["role"], "content": m["conteudo"]} for m in historico]
+    mensagens.append({"role": "system", "content": INSTRUCAO_FOLLOW_UP})
+    resposta = _cliente_openai(cliente).chat.completions.create(
+        model=agente_chat.MODELO, messages=mensagens,
+    )
+    return (resposta.choices[0].message.content or "").strip()
+
+
+def _publicar_bolhas(canal, saida: dict):
+    """Publica uma resposta pronta como bolhas (uma por parágrafo, delay
+    cumulativo) — mesma lógica que `rodar()` usa pra cada mensagem de
+    paciente, reaproveitada por quem publica fora do loop de consumo (ver
+    publicar_mensagem_avulsa)."""
+    partes = _quebrar_mensagem(saida.get("texto", ""))
+    for parte, espera in zip(partes, delays_das_bolhas(partes)):
+        canal.basic_publish(
+            "", FILA_SAIDA,
+            json.dumps({**saida, "texto": parte, "delay": espera}, ensure_ascii=False),
+            properties=pika.BasicProperties(delivery_mode=2),
+        )
+
+
+def publicar_mensagem_avulsa(saida: dict):
+    """Publica uma resposta pronta na fila de saída abrindo conexão própria
+    — pra quem não está no loop de consumo de `rodar()` (hoje, só o
+    follow-up agendado, disparado pelo painel via servidor.py). Uma conexão
+    por chamada é aceitável aqui: é uma ação esporádica (roda de tempos em
+    tempos via Schedule Trigger do n8n), não o caminho quente do atendimento."""
+    conexao = _conectar()
+    try:
+        canal = conexao.channel()
+        _publicar_bolhas(canal, saida)
+    finally:
+        conexao.close()
+
+
+def processar_follow_up(cliente: dict, contato: dict) -> dict | None:
+    """Gera e publica o follow-up pra UM contato elegível (ver
+    db.contatos_elegiveis_para_follow_up) — chamado pelo painel, fora do
+    loop normal do worker. Respeita a mesma trava de tag do Kommo que o
+    atendimento normal usa (`_lead_permite_ia`): se o Kommo bloqueia este
+    contato pra IA, um follow-up proativo seria pior ainda. Devolve o que
+    foi mandado (pro log de quem chamou), ou None se não mandou nada."""
+    if not _lead_permite_ia(cliente, contato):
+        return None
+    texto = gerar_follow_up(cliente, contato)
+    if not texto:
+        return None
+    db.salvar_mensagem_agente(contato["id"], "assistant", texto)
+    db.marcar_follow_up_enviado(contato["id"])
+    saida = {
+        "cliente_id": cliente["id"],
+        "instancia": cliente.get("evolution_instancia") or "",
+        "id_whatsapp": contato["id_whatsapp"], "texto": texto, "mensagem_id": "",
+    }
+    publicar_mensagem_avulsa(saida)
+    return saida
+
+
 def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
               contato_id: int = 0, mapa_mcp: dict | None = None,
               cliente: dict | None = None, contato: dict | None = None) -> str:
@@ -1083,14 +1163,7 @@ def rodar(uma_so: bool = False):
                 # Uma entrada na fila = uma mensagem no WhatsApp (ver "Enviar
                 # texto" no A5 Trilho - Saida), então quebrar em várias bolhas
                 # é publicar várias entradas, uma por parágrafo da resposta.
-                partes = _quebrar_mensagem(saida.get("texto", ""))
-                for parte, espera in zip(partes, delays_das_bolhas(partes)):
-                    canal.basic_publish(
-                        "", FILA_SAIDA,
-                        json.dumps({**saida, "texto": parte, "delay": espera},
-                                   ensure_ascii=False),
-                        properties=pika.BasicProperties(delivery_mode=2),
-                    )
+                _publicar_bolhas(canal, saida)
             canal.basic_ack(metodo.delivery_tag)       # só depois de publicar
             print("ok:", (saida or {}).get("texto", "(sem resposta)")[:90])
         except Exception as e:  # noqa: BLE001

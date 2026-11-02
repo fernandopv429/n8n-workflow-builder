@@ -1247,6 +1247,137 @@ def teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff():
     assert tipos.count("log") == 2, "tem que logar o handoff E o erro da tag"
 
 
+# --- follow-up agendado (02/11/2026) --------------------------------------
+
+def _com_cliente_openai_dublado(conteudo_resposta):
+    """Troca worker_agente._cliente_openai por uma dublê que devolve
+    `conteudo_resposta` como se fosse `choices[0].message.content`, e
+    devolve também os kwargs recebidos por `create` (pra inspecionar as
+    mensagens montadas)."""
+    import worker_agente as w
+    chamadas = []
+
+    class _Resposta:
+        choices = [type("Escolha", (), {
+            "message": type("Msg", (), {"content": conteudo_resposta})()})]
+
+    class _ChatDublado:
+        def create(self, **kwargs):
+            chamadas.append(kwargs)
+            return _Resposta()
+
+    class _ClienteDublado:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": _ChatDublado()})()
+
+    original = w._cliente_openai
+    w._cliente_openai = lambda cliente: _ClienteDublado()
+    return chamadas, original
+
+
+def teste_gerar_follow_up_nao_insere_mensagem_de_user_falsa():
+    """Diferente de _responder, aqui o paciente não escreveu nada — a
+    instrução de reengajar tem que entrar como 'system', nunca como 'user'
+    (isso apareceria na conversa como se o paciente tivesse dito algo que
+    ele não disse)."""
+    import worker_agente as w
+    import db
+    chamadas, original_openai = _com_cliente_openai_dublado("oi, tudo bem por aí?")
+    original_listar = db.listar_mensagens_agente
+    db.listar_mensagens_agente = lambda *a: [
+        {"role": "user", "conteudo": "quero agendar uma consulta"},
+        {"role": "assistant", "conteudo": "claro! qual dia prefere?"},
+    ]
+    try:
+        texto = w.gerar_follow_up({"cliente_nome": "hh"}, {"id": 9})
+    finally:
+        w._cliente_openai = original_openai
+        db.listar_mensagens_agente = original_listar
+    assert texto == "oi, tudo bem por aí?"
+    mensagens = chamadas[0]["messages"]
+    papeis = [m["role"] for m in mensagens]
+    # system (prompt) + user + assistant (histórico) + system (instrução) —
+    # NENHUM "user" novo além do que já estava no histórico.
+    assert papeis == ["system", "user", "assistant", "system"]
+    assert mensagens[-1]["role"] == "system"
+    assert "reengajar" not in mensagens[0]["content"]  # a instrução não é o prompt do cliente
+    assert w.INSTRUCAO_FOLLOW_UP == mensagens[-1]["content"]
+
+
+def _com_follow_up_dublado():
+    import db
+    import worker_agente as w
+    chamadas = []
+    originais = {
+        "lead_permite_ia": w._lead_permite_ia,
+        "gerar_follow_up": w.gerar_follow_up,
+        "salvar": db.salvar_mensagem_agente,
+        "marcar": db.marcar_follow_up_enviado,
+        "publicar": w.publicar_mensagem_avulsa,
+    }
+    db.salvar_mensagem_agente = lambda *a: chamadas.append(("salvar", a))
+    db.marcar_follow_up_enviado = lambda *a: chamadas.append(("marcar", a))
+    w.publicar_mensagem_avulsa = lambda *a: chamadas.append(("publicar", a))
+    return chamadas, originais
+
+
+def _restaura_follow_up(originais):
+    import db
+    import worker_agente as w
+    w._lead_permite_ia = originais["lead_permite_ia"]
+    w.gerar_follow_up = originais["gerar_follow_up"]
+    db.salvar_mensagem_agente = originais["salvar"]
+    db.marcar_follow_up_enviado = originais["marcar"]
+    w.publicar_mensagem_avulsa = originais["publicar"]
+
+
+def teste_processar_follow_up_respeita_gating_do_kommo():
+    """Se o Kommo bloqueia a IA pra este contato (sem tag, ou com LQIA), um
+    follow-up proativo seria pior ainda que ficar calado — nem gera nem
+    manda nada."""
+    import worker_agente as w
+    chamadas, originais = _com_follow_up_dublado()
+    w._lead_permite_ia = lambda *a: False
+    w.gerar_follow_up = lambda *a: (_ for _ in ()).throw(AssertionError("não devia gerar"))
+    try:
+        r = w.processar_follow_up({"id": 1}, {"id": 9, "id_whatsapp": "5511999999999"})
+    finally:
+        _restaura_follow_up(originais)
+    assert r is None
+    assert not chamadas
+
+
+def teste_processar_follow_up_envia_salva_e_marca():
+    import worker_agente as w
+    chamadas, originais = _com_follow_up_dublado()
+    w._lead_permite_ia = lambda *a: True
+    w.gerar_follow_up = lambda *a: "oi! ainda conseguiu ver aquele horário?"
+    try:
+        r = w.processar_follow_up(
+            {"id": 1, "evolution_instancia": "a5-hh"},
+            {"id": 9, "id_whatsapp": "5511999999999"})
+    finally:
+        _restaura_follow_up(originais)
+    assert r["texto"] == "oi! ainda conseguiu ver aquele horário?"
+    assert r["instancia"] == "a5-hh"
+    assert ("salvar", (9, "assistant", "oi! ainda conseguiu ver aquele horário?")) in chamadas
+    assert ("marcar", (9,)) in chamadas
+    assert any(c[0] == "publicar" for c in chamadas)
+
+
+def teste_processar_follow_up_sem_texto_nao_manda_nada():
+    import worker_agente as w
+    chamadas, originais = _com_follow_up_dublado()
+    w._lead_permite_ia = lambda *a: True
+    w.gerar_follow_up = lambda *a: ""
+    try:
+        r = w.processar_follow_up({"id": 1}, {"id": 9, "id_whatsapp": "5511999999999"})
+    finally:
+        _restaura_follow_up(originais)
+    assert r is None
+    assert not chamadas
+
+
 # --- tag IA ATIVA: gating do agente pelo Kommo (31/10/2026) ---------------
 
 def teste_lead_permite_ia_sem_credencial_kommo():
@@ -1657,6 +1788,10 @@ TESTES = [
     teste_chamar_humano_grava_evento_e_nao_mexe_no_kommo_sem_lead_id,
     teste_chamar_humano_marca_tag_quando_tem_lead_id_e_credencial,
     teste_chamar_humano_falha_na_tag_nao_derruba_o_handoff,
+    teste_gerar_follow_up_nao_insere_mensagem_de_user_falsa,
+    teste_processar_follow_up_respeita_gating_do_kommo,
+    teste_processar_follow_up_envia_salva_e_marca,
+    teste_processar_follow_up_sem_texto_nao_manda_nada,
     teste_lead_permite_ia_sem_credencial_kommo,
     teste_lead_permite_ia_quando_lead_nao_encontrado,
     teste_lead_permite_ia_em_erro_do_kommo,
