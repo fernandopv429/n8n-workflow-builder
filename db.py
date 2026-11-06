@@ -97,6 +97,12 @@ def garantir_schema():
         # ruim — seja feita no painel, pelo chat de gerenciamento, ou pelo
         # próprio agente geral no WhatsApp (ver restaurar_prompt_anterior).
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS prompt_anterior TEXT")
+        # Nome da tag que marca "a IA cuida deste lead". O comportamento é
+        # geral, mas o NOME é por cliente: cada CRM tem a sua convenção, e
+        # fixar "IA ATIVA" no código obrigava o cliente a adotar a nossa
+        # (pedido do Fernando, 01/11/2026). Vazio volta ao padrão.
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS "
+                     "tag_ia_ativa TEXT NOT NULL DEFAULT 'IA ATIVA'")
         # Migração 15/10/2026 (clonado->ativo) + 30/10/2026 (drop de
         # workflow_novo_id/url) já rodaram com sucesso e cumpriram o papel —
         # REMOVIDAS em 31/10/2026 depois de descobrir que elas travavam TODO
@@ -1293,6 +1299,21 @@ def remover_mcp_do_cliente(cliente_id: int, apelido: str):
     with _conectar() as conn:
         conn.execute("DELETE FROM cliente_mcps WHERE cliente_id = %s AND apelido = %s",
                      (cliente_id, apelido))
+
+
+def definir_tag_ia(cliente_id: int, tag: str) -> str:
+    """Troca o nome da tag de IA ativa deste cliente. Devolve o valor que ficou.
+
+    Vazio volta ao padrão: cliente sem tag definida seria cliente cuja marcação
+    some sem ninguém ter pedido, e `_lead_permite_ia` passaria a procurar uma
+    tag de nome vazio em todo lead.
+    """
+    import worker_agente
+    final = (tag or "").strip() or worker_agente.TAG_IA_ATIVA
+    with _conectar() as conn:
+        conn.execute("UPDATE clientes SET tag_ia_ativa = %s WHERE id = %s",
+                     (final, cliente_id))
+    return final
 
 
 def definir_agente_ativo(cliente_id: int, ativo: bool):

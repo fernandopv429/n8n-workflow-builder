@@ -1866,7 +1866,53 @@ def teste_sugestao_melhoria_ignora_lista_vazia_sem_chamar_a_openai():
     assert qa.sugerir_melhoria_prompt("prompt", []) is None
 
 
+def teste_tag_de_ia_sai_do_cadastro_do_cliente():
+    """O comportamento é geral, o NOME é por cliente.
+
+    Fixar "IA ATIVA" no código obrigava o cliente a adotar a nossa convenção,
+    mesmo já tendo uma no CRM dele."""
+    import worker_agente as w
+
+    assert w.tag_ia_de({"tag_ia_ativa": "BOT CUIDANDO"}) == "BOT CUIDANDO"
+    # quem não escolheu segue com o padrão, sem fazer nada
+    assert w.tag_ia_de({}) == w.TAG_IA_ATIVA
+    assert w.tag_ia_de({"tag_ia_ativa": None}) == w.TAG_IA_ATIVA
+    # tag de nome vazio faria _lead_permite_ia procurar "" em todo lead
+    assert w.tag_ia_de({"tag_ia_ativa": "   "}) == w.TAG_IA_ATIVA
+    assert w.tag_ia_de(None) == w.TAG_IA_ATIVA
+
+
+def teste_tag_personalizada_decide_se_a_ia_responde():
+    """Trocar o nome não pode deixar a checagem olhando pra tag antiga —
+    senão o agente ficaria mudo em todo lead marcado com a nova."""
+    import db
+    import worker_agente as w
+
+    cliente = {"id": 1, "tag_ia_ativa": "BOT CUIDANDO"}
+    contato = {"id": 1, "id_whatsapp": "5511999998888"}
+
+    orig_cred = db.obter_credenciais_kommo
+    orig_lead = db.obter_lead_kommo
+    db.obter_credenciais_kommo = lambda cid: {"kommo_domain": "x.kommo.com",
+                                              "access_token": "t"}
+    try:
+        db.obter_lead_kommo = lambda cid, tel: {"tags": ["BOT CUIDANDO"]}
+        assert w._lead_permite_ia(cliente, contato) is True
+        # a tag padrão NÃO vale pra quem escolheu outra
+        db.obter_lead_kommo = lambda cid, tel: {"tags": ["IA ATIVA"]}
+        assert w._lead_permite_ia(cliente, contato) is False
+        # transferência continua mandando, seja qual for o nome da outra
+        db.obter_lead_kommo = lambda cid, tel: {
+            "tags": ["BOT CUIDANDO", w.TAG_TRANSFERIDO_ATENDENTE]}
+        assert w._lead_permite_ia(cliente, contato) is False
+    finally:
+        db.obter_credenciais_kommo = orig_cred
+        db.obter_lead_kommo = orig_lead
+
+
 TESTES = [
+    teste_tag_de_ia_sai_do_cadastro_do_cliente,
+    teste_tag_personalizada_decide_se_a_ia_responde,
     teste_mcp_local_tem_o_mesmo_contrato_do_n8n,
     teste_tags_preservam_as_existentes,
     teste_erro_do_kommo_chega_legivel_no_modelo,

@@ -345,6 +345,7 @@
       <button type="button" class="handoff-botao" id="botao-analisar-qa">Analisar atendimento</button>
       <span id="qa-aviso" class="opcional"></span>
     </div>
+    <div id="atendimento-config"></div>
     <div id="atendimento-lista"></div>
   </div>
 
@@ -1711,7 +1712,49 @@ async function carregarConsumo() {
 // Separado do chat do painel de propósito: lá você fala SOBRE o cliente, aqui
 // você vê o que o agente falou COM o paciente dele.
 
+async function montarTagIa() {
+  // Fica na aba Atendimento porque é o mesmo assunto do handoff: quem está
+  // cuidando da conversa. Remonta a cada troca de cliente — a tag é por
+  // cliente, e montar uma vez só mostraria a do primeiro que você abriu.
+  const cfg = document.getElementById('atendimento-config');
+  if (!cfg || cfg.dataset.cliente === String(clienteAtualId)) return;
+  cfg.dataset.cliente = String(clienteAtualId);
+
+  let tag = 'IA ATIVA';
+  try {
+    const c = await (await fetch(`/clientes/${clienteAtualId}`)).json();
+    tag = c.tag_ia_ativa || 'IA ATIVA';
+  } catch (e) { /* sem resposta: abre com o padrão */ }
+
+  cfg.innerHTML = `
+    <p class="hint">Tag que marca no Kommo que a IA cuida do lead. Enquanto o
+      lead tiver esta tag — e não tiver a de transferência — o agente responde.
+      Troque se a sua equipe já usa outro nome no CRM.</p>
+    <div class="linha" style="gap:8px">
+      <input type="text" id="tag-ia" value="${escaparHtml(tag)}"
+             placeholder="IA ATIVA" style="max-width:220px">
+      <button type="button" class="handoff-botao" id="btn-tag-ia">Salvar</button>
+      <span id="tag-ia-aviso" class="opcional"></span>
+    </div>`;
+
+  document.getElementById('btn-tag-ia').addEventListener('click', async (ev) => {
+    const aviso = document.getElementById('tag-ia-aviso');
+    ev.target.disabled = true;
+    const r = await fetch(`/clientes/${clienteAtualId}/tag-ia`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag: document.getElementById('tag-ia').value }),
+    });
+    const d = await r.json();
+    ev.target.disabled = false;
+    if (!r.ok) { aviso.textContent = d.error || 'falha ao salvar'; return; }
+    // vazio volta ao padrão, e o campo precisa mostrar o que de fato ficou
+    document.getElementById('tag-ia').value = d.tag;
+    aviso.textContent = 'salvo — leads já marcados com o nome antigo deixam de ser reconhecidos';
+  });
+}
+
 async function carregarAtendimento() {
+  montarTagIa();
   const lista = document.getElementById('atendimento-lista');
   const resumo = document.getElementById('atendimento-resumo');
   let contatos = [];

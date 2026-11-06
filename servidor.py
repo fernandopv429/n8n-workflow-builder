@@ -72,6 +72,9 @@ except Exception as e:  # noqa: BLE001
     sys.stderr.write(f"[servidor] AVISO: falha ao garantir schema no banco: {e}\n")
 
 ROTA_CLIENTE_ID = re.compile(r"^/clientes/(\d+)$")
+# Nome da tag de IA ativa, por cliente. O comportamento é geral; o nome é
+# convenção de cada CRM (ver worker_agente.tag_ia_de).
+ROTA_CLIENTE_TAG_IA = re.compile(r"^/clientes/(\d+)/tag-ia$")
 ROTA_CLIENTE_LOGS = re.compile(r"^/clientes/(\d+)/logs$")
 ROTA_CLIENTE_CREDENCIAIS = re.compile(r"^/clientes/(\d+)/credenciais$")
 ROTA_CLIENTE_MENSAGENS = re.compile(r"^/clientes/(\d+)/mensagens$")
@@ -267,14 +270,15 @@ class Handler(BaseHTTPRequestHandler):
             # antes do webhook existir) — provisiona a tag como no contato
             # novo via WhatsApp (_provisionar_tag_ia_ativa), só que aqui a
             # gente já tem o lead_id, sem precisar buscar por telefone.
-            if (worker_agente.TAG_IA_ATIVA not in tags
+            tag_ia = worker_agente.tag_ia_de(db.obter_cliente(cliente_id) or {})
+            if (tag_ia not in tags
                     and worker_agente.TAG_TRANSFERIDO_ATENDENTE not in tags):
                 resultado = kommo_cartao.adicionar_tag(
                     credenciais["kommo_domain"], credenciais["access_token"],
-                    lead_id, worker_agente.TAG_IA_ATIVA, ", ".join(tags))
+                    lead_id, tag_ia, ", ".join(tags))
                 if resultado.startswith("erro"):
                     raise RuntimeError(resultado)
-                tags = json.loads(resultado).get("tags_agora", tags + [worker_agente.TAG_IA_ATIVA])
+                tags = json.loads(resultado).get("tags_agora", tags + [tag_ia])
             db.salvar_lead_kommo(cliente_id, telefone, int(lead_id), tags, status_id, pipeline_id)
             db.registrar_evento_lead_kommo(cliente_id, lead_id, telefone, "criado",
                                            {"tags": tags, "status_id": status_id,
@@ -630,6 +634,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not self._autenticado():
+            return
+
+        m = ROTA_CLIENTE_TAG_IA.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            if db.obter_cliente(cliente_id) is None:
+                self._responder_json(404, {"error": "cliente não encontrado"})
+                return
+            atual = db.definir_tag_ia(cliente_id, str(self._ler_corpo().get("tag", "")))
+            db.registrar_log(cliente_id, "sistema",
+                             f"Tag de IA ativa agora é '{atual}'. Vale para as "
+                             "próximas marcações; leads já marcados com o nome "
+                             "anterior continuam como estão — e deixam de ser "
+                             "reconhecidos, então renomeie lá também se já usou.")
+            self._responder_json(200, {"tag": atual})
             return
 
         if ROTA_GERAL.match(self.path):

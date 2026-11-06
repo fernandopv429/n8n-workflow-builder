@@ -243,6 +243,16 @@ TAG_TRANSFERIDO_ATENDENTE = "LQIA"
 TAG_IA_ATIVA = "IA ATIVA"
 
 
+def tag_ia_de(cliente: dict) -> str:
+    """A tag deste cliente, ou o padrão.
+
+    O comportamento é geral; o nome, não. Ler do cadastro em vez da constante
+    deixa o cliente manter a convenção que a equipe dele já usa no Kommo — e
+    quem não escolheu continua com "IA ATIVA", sem precisar fazer nada.
+    """
+    return ((cliente or {}).get("tag_ia_ativa") or TAG_IA_ATIVA).strip() or TAG_IA_ATIVA
+
+
 def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
     """Primeira mensagem de um contato novo (`contato["criado_agora"]`): se o
     cliente tem Kommo e existe um lead com este telefone, já marca a tag
@@ -287,20 +297,21 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
             return
         tags = lead.get("tags", [])
         status_id, pipeline_id = lead.get("status_id"), lead.get("pipeline_id")
-        if TAG_IA_ATIVA in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
+        tag_ia = tag_ia_de(cliente)
+        if tag_ia in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
             db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags, status_id, pipeline_id)
             db.registrar_log(cliente["id"], "sistema",
                              f"[worker] contato novo {tel}: lead {lead.get('id')} já tinha "
                              f"tag ({', '.join(tags) or '-'}), não mexi.")
             return
         resultado = kommo_cartao.adicionar_tag(
-            dominio, token, str(lead["id"]), TAG_IA_ATIVA, ", ".join(tags))
+            dominio, token, str(lead["id"]), tag_ia, ", ".join(tags))
         if resultado.startswith("erro"):
             raise RuntimeError(resultado)
-        tags_agora = json.loads(resultado).get("tags_agora", tags + [TAG_IA_ATIVA])
+        tags_agora = json.loads(resultado).get("tags_agora", tags + [tag_ia])
         db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags_agora, status_id, pipeline_id)
         db.registrar_log(cliente["id"], "sistema",
-                         f"[worker] contato novo {tel}: tag IA ATIVA adicionada ao "
+                         f"[worker] contato novo {tel}: tag '{tag_ia}' adicionada ao "
                          f"lead {lead.get('id')} no Kommo.")
     except Exception as e:  # noqa: BLE001 — provisionar é bônus, não trava a 1a mensagem
         db.registrar_log(cliente["id"], "erro",
@@ -338,7 +349,7 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         tags = lead_local["tags"]
         if TAG_TRANSFERIDO_ATENDENTE in tags:
             return False
-        return TAG_IA_ATIVA in tags
+        return tag_ia_de(cliente) in tags
     try:
         bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, contato["id_whatsapp"])
         if bruto.startswith("erro"):
@@ -357,7 +368,7 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         return True
     if TAG_TRANSFERIDO_ATENDENTE in tags:
         return False
-    return TAG_IA_ATIVA in tags
+    return tag_ia_de(cliente) in tags
 
 
 # Ferramentas do Cartão do Lead (Kommo), nativas — 30/10/2026: antes essas 7
