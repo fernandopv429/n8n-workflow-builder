@@ -1291,6 +1291,58 @@ class Handler(BaseHTTPRequestHandler):
         if not self._autenticado():
             return
 
+        m = ROTA_CLIENTE_MIDIAS.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            corpo = self._ler_corpo()
+            midia_id = int(corpo.get("id", 0))
+
+            # Trocar o arquivo é opcional: o caso comum é corrigir o nome ou o
+            # "quando usar", que é o texto que o agente lê pra decidir quando
+            # mandar. Sem `conteudo`, o arquivo no PocketBase fica como está.
+            bruto = str(corpo.get("conteudo", "") or "")
+            if bruto:
+                try:
+                    conteudo = base64.b64decode(bruto, validate=True)
+                except Exception:  # noqa: BLE001
+                    self._responder_json(400, {"error": "conteúdo do arquivo inválido"})
+                    return
+                mimetype = str(corpo.get("mimetype", "")).strip() or "application/octet-stream"
+                nome_original = str(corpo.get("nome_original", "")).strip() or "arquivo"
+                try:
+                    enviado = pocketbase_client.enviar_midia(
+                        cliente_id, str(corpo.get("nome", "")).strip() or nome_original,
+                        nome_original, conteudo)
+                except pocketbase_client.PocketBaseError as e:
+                    self._responder_json(400, {"error": str(e)})
+                    return
+                antigo = db.trocar_arquivo_midia(
+                    cliente_id, midia_id, enviado["record_id"], enviado["filename"],
+                    nome_original, mimetype, len(conteudo))
+                # o anterior sai do PocketBase: substituir sem remover deixa
+                # o arquivo velho pendurado no hub, sem nada apontando pra ele
+                if antigo:
+                    try:
+                        pocketbase_client.remover_midia(antigo)
+                    except pocketbase_client.PocketBaseError as e:
+                        db.registrar_log(cliente_id, "erro",
+                                         f"arquivo trocado mas o anterior ficou no "
+                                         f"PocketBase: {e}")
+
+            r = db.atualizar_midia(cliente_id, midia_id,
+                                   str(corpo.get("nome", "")),
+                                   str(corpo.get("descricao", "")))
+            if r.get("erro"):
+                self._responder_json(400, {"error": r["erro"]})
+                return
+            db.registrar_log(cliente_id, "sistema",
+                             f"Arquivo '{r['nome']}' editado"
+                             + (" (arquivo substituído)" if bruto else "")
+                             + ". Se o nome mudou e ele é citado no prompt, "
+                               "ajuste lá também — o agente escolhe pelo nome.")
+            self._responder_json(200, {"salvo": True, **r})
+            return
+
         m = ROTA_CONTATO_RESET.match(self.path)
         if m:
             contato_id = int(m.group(1))

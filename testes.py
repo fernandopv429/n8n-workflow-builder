@@ -1910,7 +1910,50 @@ def teste_tag_personalizada_decide_se_a_ia_responde():
         db.obter_lead_kommo = orig_lead
 
 
+def teste_editar_arquivo_barra_nome_vazio_e_duplicado():
+    """Nome é como o agente escolhe o arquivo.
+
+    Vazio deixaria um item inalcançável; repetido faria `obter_midia` devolver
+    um dos dois sem critério — e o agente mandaria o errado."""
+    import db
+
+    chamadas = []
+
+    class _Cur:
+        def __init__(self, linha): self.linha = linha
+        def fetchone(self): return self.linha
+
+    class _Conn:
+        def __init__(self, conflito): self.conflito = conflito
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, sql, args=None):
+            chamadas.append(sql)
+            if "SELECT id FROM cliente_midias" in sql:
+                return _Cur((99,) if self.conflito else None)
+            return _Cur(("novo nome", "nova desc"))
+
+    original = db._conectar
+    try:
+        db._conectar = lambda: _Conn(False)
+        assert "erro" in db.atualizar_midia(1, 1, "   ", "x")
+        # nome vazio nem chega a consultar o banco
+        assert not chamadas
+
+        db._conectar = lambda: _Conn(True)
+        r = db.atualizar_midia(1, 1, "promo", "x")
+        assert "já existe outro arquivo" in r.get("erro", ""), r
+        assert not any("UPDATE" in c for c in chamadas), "gravou mesmo com conflito"
+
+        db._conectar = lambda: _Conn(False)
+        r = db.atualizar_midia(1, 1, "novo nome", "nova desc")
+        assert r == {"nome": "novo nome", "descricao": "nova desc"}, r
+    finally:
+        db._conectar = original
+
+
 TESTES = [
+    teste_editar_arquivo_barra_nome_vazio_e_duplicado,
     teste_tag_de_ia_sai_do_cadastro_do_cliente,
     teste_tag_personalizada_decide_se_a_ia_responde,
     teste_mcp_local_tem_o_mesmo_contrato_do_n8n,

@@ -1458,9 +1458,30 @@ async function carregarArquivos() {
         <br><small class="hint">${escaparHtml(i.nome_original)} · ${escaparHtml(i.mimetype)} · ${tamanhoLegivel(i.tamanho)}</small></td>
       <td>${escaparHtml(i.descricao || '')}
         ${i.url ? `<br><a href="${escaparHtml(i.url)}" target="_blank" class="hint">ver arquivo</a>` : ''}</td>
-      <td style="text-align:right">
+      <td style="text-align:right; white-space:nowrap">
+        <button type="button" class="handoff-botao arq-editar" data-id="${i.id}"
+                data-nome="${escaparHtml(i.nome)}"
+                data-desc="${escaparHtml(i.descricao || '')}">editar</button>
         <button type="button" class="handoff-botao arq-apagar" data-id="${i.id}"
                 data-nome="${escaparHtml(i.nome)}">apagar</button></td>
+    </tr>
+    <tr class="arq-edicao" id="edicao-${i.id}" style="display:none">
+      <td colspan="3">
+        <div class="linha" style="gap:8px; flex-wrap:wrap">
+          <input type="text" class="arq-e-nome" data-id="${i.id}"
+                 value="${escaparHtml(i.nome)}" style="max-width:200px">
+          <input type="text" class="arq-e-desc" data-id="${i.id}"
+                 value="${escaparHtml(i.descricao || '')}" placeholder="quando usar"
+                 style="max-width:260px">
+          <input type="file" class="arq-e-arquivo" data-id="${i.id}" style="max-width:200px">
+          <button type="button" class="handoff-botao arq-salvar" data-id="${i.id}">Salvar</button>
+          <button type="button" class="handoff-botao arq-cancelar" data-id="${i.id}">cancelar</button>
+        </div>
+        <small class="hint">Deixe o arquivo em branco pra manter o atual — trocar
+          só é necessário quando o conteúdo mudou. Renomear vale a pena pensar:
+          o agente escolhe pelo nome, e se ele estiver citado no prompt, ajuste
+          lá também.</small>
+      </td>
     </tr>`).join('');
 
   caixa.innerHTML = `
@@ -1516,6 +1537,48 @@ async function carregarArquivos() {
     aviso.textContent = '';
     carregarArquivos();
   });
+
+  caixa.querySelectorAll('.arq-editar').forEach(x => x.addEventListener('click', ev => {
+    const linha = document.getElementById(`edicao-${ev.target.dataset.id}`);
+    linha.style.display = linha.style.display === 'none' ? 'table-row' : 'none';
+  }));
+  caixa.querySelectorAll('.arq-cancelar').forEach(x => x.addEventListener('click', ev => {
+    document.getElementById(`edicao-${ev.target.dataset.id}`).style.display = 'none';
+  }));
+  caixa.querySelectorAll('.arq-salvar').forEach(x => x.addEventListener('click', async (ev) => {
+    const id = ev.target.dataset.id;
+    const aviso = document.getElementById('arquivos-aviso');
+    const entrada = caixa.querySelector(`.arq-e-arquivo[data-id="${id}"]`);
+    const arquivo = entrada.files && entrada.files[0];
+    ev.target.disabled = true;
+    aviso.textContent = arquivo ? 'enviando o novo arquivo…' : 'salvando…';
+
+    const corpo = {
+      id: Number(id),
+      nome: caixa.querySelector(`.arq-e-nome[data-id="${id}"]`).value,
+      descricao: caixa.querySelector(`.arq-e-desc[data-id="${id}"]`).value,
+    };
+    if (arquivo) {
+      corpo.nome_original = arquivo.name;
+      corpo.mimetype = arquivo.type || 'application/octet-stream';
+      corpo.conteudo = await new Promise((resolve, reject) => {
+        const leitor = new FileReader();
+        leitor.onload = () => resolve(String(leitor.result).split(',')[1] || '');
+        leitor.onerror = reject;
+        leitor.readAsDataURL(arquivo);
+      });
+    }
+
+    const resp = await fetch(`/clientes/${clienteAtualId}/midias`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(corpo),
+    });
+    const d = await resp.json();
+    ev.target.disabled = false;
+    if (!resp.ok) { aviso.textContent = d.error || 'falha ao salvar.'; return; }
+    aviso.textContent = '';
+    carregarArquivos();
+  }));
 
   caixa.querySelectorAll('.arq-apagar').forEach(x => x.addEventListener('click', async (ev) => {
     const nome = ev.target.dataset.nome;

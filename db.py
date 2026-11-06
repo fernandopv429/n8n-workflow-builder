@@ -1208,6 +1208,59 @@ def salvar_midia(cliente_id: int, nome: str, descricao: str, pb_record_id: str,
         return {"id": linha[0], "pb_record_id": linha[1]}
 
 
+def atualizar_midia(cliente_id: int, midia_id: int, nome: str,
+                    descricao: str) -> dict:
+    """Renomeia e reescreve o "quando usar" de um arquivo já cadastrado.
+
+    Renomear NÃO é inofensivo: o agente escolhe o arquivo pelo nome, e o nome
+    antigo pode estar escrito no prompt do cliente. Quem chama avisa — aqui a
+    única garantia é não deixar dois arquivos com o mesmo nome no mesmo
+    cliente, que faria `obter_midia` devolver um dos dois sem critério.
+    """
+    nome = (nome or "").strip()
+    if not nome:
+        return {"erro": "o nome não pode ficar vazio — é por ele que o agente escolhe"}
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT id FROM cliente_midias WHERE cliente_id = %s "
+            "AND lower(nome) = lower(%s) AND id <> %s",
+            (cliente_id, nome, midia_id))
+        if cur.fetchone():
+            return {"erro": f"já existe outro arquivo chamado '{nome}' neste cliente"}
+        cur = conn.execute(
+            "UPDATE cliente_midias SET nome = %s, descricao = %s "
+            "WHERE cliente_id = %s AND id = %s RETURNING nome, descricao",
+            (nome, (descricao or "").strip(), cliente_id, midia_id))
+        linha = cur.fetchone()
+    if not linha:
+        return {"erro": "arquivo não encontrado neste cliente"}
+    return {"nome": linha[0], "descricao": linha[1]}
+
+
+def trocar_arquivo_midia(cliente_id: int, midia_id: int, pb_record_id: str,
+                         pb_filename: str, nome_original: str, mimetype: str,
+                         tamanho: int) -> str:
+    """Troca o arquivo mantendo nome e descrição. Devolve o record antigo, pra
+    quem chamou removê-lo do PocketBase — deixar órfão acumula lixo no hub."""
+    with _conectar() as conn:
+        # lê o antigo ANTES de sobrescrever: subconsulta dentro do RETURNING
+        # depende de qual snapshot o Postgres enxerga, e não vale o risco
+        cur = conn.execute(
+            "SELECT pb_record_id FROM cliente_midias WHERE cliente_id = %s AND id = %s",
+            (cliente_id, midia_id))
+        linha = cur.fetchone()
+        if not linha:
+            return ""
+        antigo = linha[0]
+        conn.execute(
+            "UPDATE cliente_midias SET pb_record_id = %s, pb_filename = %s, "
+            "nome_original = %s, mimetype = %s, tamanho = %s "
+            "WHERE cliente_id = %s AND id = %s",
+            (pb_record_id, pb_filename, nome_original, mimetype, tamanho,
+             cliente_id, midia_id))
+    return antigo
+
+
 def apagar_midia(cliente_id: int, midia_id: int) -> str:
     """Devolve o record_id pra quem chamou apagar do PocketBase também — linha
     removida com arquivo órfão deixa lixo acumulando no hub."""
