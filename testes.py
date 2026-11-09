@@ -1877,9 +1877,11 @@ def teste_tag_de_ia_sai_do_cadastro_do_cliente():
     # quem não escolheu segue com o padrão, sem fazer nada
     assert w.tag_ia_de({}) == w.TAG_IA_ATIVA
     assert w.tag_ia_de({"tag_ia_ativa": None}) == w.TAG_IA_ATIVA
-    # tag de nome vazio faria _lead_permite_ia procurar "" em todo lead
-    assert w.tag_ia_de({"tag_ia_ativa": "   "}) == w.TAG_IA_ATIVA
     assert w.tag_ia_de(None) == w.TAG_IA_ATIVA
+    # vazio é ESCOLHA ("não uso tag"), não falta de escolha — e não pode virar
+    # o padrão nem ser procurado como tag de nome "" em todo lead
+    assert w.tag_ia_de({"tag_ia_ativa": ""}) == ""
+    assert w.tag_ia_de({"tag_ia_ativa": "   "}) == ""
 
 
 def teste_tag_personalizada_decide_se_a_ia_responde():
@@ -1952,7 +1954,39 @@ def teste_editar_arquivo_barra_nome_vazio_e_duplicado():
         db._conectar = original
 
 
+def teste_sem_tag_a_ia_responde_qualquer_lead():
+    """Cliente que não usa a convenção no CRM: a trava sai do caminho.
+
+    Sem isso, todo lead sem a tag ficava mudo — e não havia como desligar,
+    porque campo vazio voltava ao padrão."""
+    import db
+    import worker_agente as w
+
+    cliente = {"id": 1, "tag_ia_ativa": ""}
+    contato = {"id": 1, "id_whatsapp": "5511999998888"}
+
+    chamou = []
+    orig_cred = db.obter_credenciais_kommo
+    orig_lead = db.obter_lead_kommo
+    db.obter_credenciais_kommo = lambda cid: chamou.append("cred") or {
+        "kommo_domain": "x.kommo.com", "access_token": "t"}
+    # lead marcado com OUTRA tag: com trava ligada isso calaria o agente
+    db.obter_lead_kommo = lambda cid, tel: {"tags": ["IA ATIVA"]}
+    try:
+        assert w._lead_permite_ia(cliente, contato) is True
+        # nem chega a consultar credencial: não há o que checar no Kommo
+        assert not chamou, chamou
+
+        # e provisionar não mexe em lead nenhum
+        w._provisionar_tag_ia_ativa(cliente, contato)
+        assert not chamou, chamou
+    finally:
+        db.obter_credenciais_kommo = orig_cred
+        db.obter_lead_kommo = orig_lead
+
+
 TESTES = [
+    teste_sem_tag_a_ia_responde_qualquer_lead,
     teste_editar_arquivo_barra_nome_vazio_e_duplicado,
     teste_tag_de_ia_sai_do_cadastro_do_cliente,
     teste_tag_personalizada_decide_se_a_ia_responde,

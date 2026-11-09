@@ -244,13 +244,24 @@ TAG_IA_ATIVA = "IA ATIVA"
 
 
 def tag_ia_de(cliente: dict) -> str:
-    """A tag deste cliente, ou o padrão.
+    """A tag deste cliente. String vazia significa "não usa tag".
 
     O comportamento é geral; o nome, não. Ler do cadastro em vez da constante
-    deixa o cliente manter a convenção que a equipe dele já usa no Kommo — e
-    quem não escolheu continua com "IA ATIVA", sem precisar fazer nada.
+    deixa o cliente manter a convenção que a equipe dele já usa no Kommo.
+
+    Três estados, e a diferença importa:
+      - coluna ausente/None  -> padrão "IA ATIVA" (cliente que nunca configurou)
+      - texto                -> essa tag
+      - string vazia         -> SEM tag: a IA responde a qualquer lead e nada
+                                é provisionado no Kommo
+
+    Quem chama precisa tratar o vazio: procurar uma tag de nome "" em todo
+    lead não acharia nada e calaria o agente — o oposto do pedido.
     """
-    return ((cliente or {}).get("tag_ia_ativa") or TAG_IA_ATIVA).strip() or TAG_IA_ATIVA
+    valor = (cliente or {}).get("tag_ia_ativa")
+    if valor is None:
+        return TAG_IA_ATIVA
+    return valor.strip()
 
 
 def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
@@ -268,6 +279,8 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
     `kommo_leads` existe: achar o lead por busca ao vivo (telefone no
     contato, não no lead — ver kommo_cartao.buscar_lead_por_telefone) é
     lento e já se mostrou frágil (01/11/2026)."""
+    if not tag_ia_de(cliente):
+        return  # cliente não usa tag: nada a provisionar
     credenciais = db.obter_credenciais_kommo(cliente["id"])
     if not credenciais:
         return
@@ -321,6 +334,9 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
 def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
     """Decide, pelas tags do Kommo, se a IA pode responder este contato agora.
 
+    - cliente sem tag configurada (campo vazio na aba Atendimento): responde
+      normal, e nem consulta o Kommo — é a escolha de quem não usa essa
+      convenção no CRM.
     - sem Kommo cadastrado, sem credencial completa, lead não encontrado por
       telefone, ou erro de rede/Kommo: responde normal — nada pra travar.
     - lead com a tag de transferência (LQIA — mesma do handoff manual, pode
@@ -337,6 +353,12 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
     chama o Kommo, é leitura local. Só cai pra busca ao vivo
     (`kommo_cartao.buscar_lead_por_telefone`) se não tiver registro — lead
     criado antes do webhook existir, ou cliente sem webhook configurado."""
+    # Antes de qualquer consulta: sem tag configurada não há o que checar, e
+    # buscar credencial (ou o lead) seria trabalho jogado fora em TODA mensagem.
+    if not tag_ia_de(cliente):
+        # cliente escolheu não usar tag: a decisão volta a ser só o status do
+        # contato, como era antes da trava existir
+        return True
     credenciais = db.obter_credenciais_kommo(cliente["id"])
     if not credenciais:
         return True

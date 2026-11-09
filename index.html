@@ -1789,30 +1789,49 @@ async function montarTagIa() {
     tag = c.tag_ia_ativa || 'IA ATIVA';
   } catch (e) { /* sem resposta: abre com o padrão */ }
 
+  const semTag = tag === '';
   cfg.innerHTML = `
     <p class="hint">Tag que marca no Kommo que a IA cuida do lead. Enquanto o
       lead tiver esta tag — e não tiver a de transferência — o agente responde.
-      Troque se a sua equipe já usa outro nome no CRM.</p>
-    <div class="linha" style="gap:8px">
-      <input type="text" id="tag-ia" value="${escaparHtml(tag)}"
-             placeholder="IA ATIVA" style="max-width:220px">
+      Troque se a sua equipe já usa outro nome no CRM, ou desmarque para não
+      usar tag nenhuma: aí a IA responde qualquer lead e quem decide é só o
+      status aqui do Atendimento.</p>
+    <div class="linha" style="gap:8px; align-items:center; flex-wrap:wrap">
+      <label class="opcional"><input type="checkbox" id="tag-ia-usar"
+             ${semTag ? '' : 'checked'}> usar tag</label>
+      <input type="text" id="tag-ia" value="${escaparHtml(semTag ? 'IA ATIVA' : tag)}"
+             placeholder="IA ATIVA" style="max-width:220px"
+             ${semTag ? 'disabled' : ''}>
       <button type="button" class="handoff-botao" id="btn-tag-ia">Salvar</button>
       <span id="tag-ia-aviso" class="opcional"></span>
     </div>`;
+
+  // o campo acompanha a caixa: campo editável com "usar tag" desmarcado faria
+  // parecer que o nome digitado vale pra alguma coisa
+  document.getElementById('tag-ia-usar').addEventListener('change', ev => {
+    document.getElementById('tag-ia').disabled = !ev.target.checked;
+  });
 
   document.getElementById('btn-tag-ia').addEventListener('click', async (ev) => {
     const aviso = document.getElementById('tag-ia-aviso');
     ev.target.disabled = true;
     const r = await fetch(`/clientes/${clienteAtualId}/tag-ia`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tag: document.getElementById('tag-ia').value }),
+      body: JSON.stringify({
+        tag: document.getElementById('tag-ia-usar').checked
+          ? document.getElementById('tag-ia').value : '',
+      }),
     });
     const d = await r.json();
     ev.target.disabled = false;
     if (!r.ok) { aviso.textContent = d.error || 'falha ao salvar'; return; }
-    // vazio volta ao padrão, e o campo precisa mostrar o que de fato ficou
-    document.getElementById('tag-ia').value = d.tag;
-    aviso.textContent = 'salvo — leads já marcados com o nome antigo deixam de ser reconhecidos';
+    const usa = !!d.tag;
+    document.getElementById('tag-ia-usar').checked = usa;
+    document.getElementById('tag-ia').disabled = !usa;
+    if (usa) document.getElementById('tag-ia').value = d.tag;
+    aviso.textContent = usa
+      ? 'salvo — leads marcados com o nome antigo deixam de ser reconhecidos'
+      : 'salvo — sem tag: a IA responde qualquer lead, e nenhuma tag é criada no Kommo';
   });
 }
 

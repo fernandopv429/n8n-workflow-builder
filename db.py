@@ -1357,12 +1357,14 @@ def remover_mcp_do_cliente(cliente_id: int, apelido: str):
 def definir_tag_ia(cliente_id: int, tag: str) -> str:
     """Troca o nome da tag de IA ativa deste cliente. Devolve o valor que ficou.
 
-    Vazio volta ao padrão: cliente sem tag definida seria cliente cuja marcação
-    some sem ninguém ter pedido, e `_lead_permite_ia` passaria a procurar uma
-    tag de nome vazio em todo lead.
+    Vazio DESLIGA a trava: o agente passa a responder qualquer lead, e nenhuma
+    tag é provisionada. É o cliente que não usa essa convenção no CRM.
     """
-    import worker_agente
-    final = (tag or "").strip() or worker_agente.TAG_IA_ATIVA
+    # Vazio é uma ESCOLHA, não falta de escolha: significa "este cliente não
+    # usa tag", e aí `_lead_permite_ia` deixa a IA responder a qualquer lead.
+    # Antes isto voltava ao padrão, então não havia como desligar a trava — e
+    # um cliente que não usa a convenção ficava com todo lead mudo.
+    final = (tag or "").strip()
     with _conectar() as conn:
         conn.execute("UPDATE clientes SET tag_ia_ativa = %s WHERE id = %s",
                      (final, cliente_id))
