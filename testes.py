@@ -1985,7 +1985,47 @@ def teste_sem_tag_a_ia_responde_qualquer_lead():
         db.obter_lead_kommo = orig_lead
 
 
+def teste_funil_restringe_onde_o_agente_atua():
+    """Lead com a tag certa mas em OUTRO funil não é respondido.
+
+    A conta da performace tem 17 funis e um só é da campanha — sem o filtro,
+    lead de teste e de e-mail marketing seria atendido igual."""
+    import db
+    import worker_agente as w
+
+    cliente = {"id": 1, "tag_ia_ativa": "BN-IA", "kommo_funil_id": 12104615}
+    contato = {"id": 1, "id_whatsapp": "5511999998888"}
+
+    orig_cred = db.obter_credenciais_kommo
+    orig_lead = db.obter_lead_kommo
+    db.obter_credenciais_kommo = lambda cid: {"kommo_domain": "x.kommo.com",
+                                              "access_token": "t"}
+    try:
+        # funil certo + tag certa: responde
+        db.obter_lead_kommo = lambda cid, tel: {"tags": ["BN-IA"],
+                                                "pipeline_id": 12104615}
+        assert w._lead_permite_ia(cliente, contato) is True
+        # funil errado, mesmo com a tag: cala
+        db.obter_lead_kommo = lambda cid, tel: {"tags": ["BN-IA"],
+                                                "pipeline_id": 13873340}
+        assert w._lead_permite_ia(cliente, contato) is False
+        # funil desconhecido (cache antigo): NÃO cala — falta de informação
+        # não pode derrubar lead legítimo em silêncio
+        db.obter_lead_kommo = lambda cid, tel: {"tags": ["BN-IA"],
+                                                "pipeline_id": None}
+        assert w._lead_permite_ia(cliente, contato) is True
+        # sem funil configurado (0): tudo como antes
+        cliente0 = dict(cliente, kommo_funil_id=0)
+        db.obter_lead_kommo = lambda cid, tel: {"tags": ["BN-IA"],
+                                                "pipeline_id": 13873340}
+        assert w._lead_permite_ia(cliente0, contato) is True
+    finally:
+        db.obter_credenciais_kommo = orig_cred
+        db.obter_lead_kommo = orig_lead
+
+
 TESTES = [
+    teste_funil_restringe_onde_o_agente_atua,
     teste_sem_tag_a_ia_responde_qualquer_lead,
     teste_editar_arquivo_barra_nome_vazio_e_duplicado,
     teste_tag_de_ia_sai_do_cadastro_do_cliente,

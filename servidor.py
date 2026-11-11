@@ -75,6 +75,9 @@ ROTA_CLIENTE_ID = re.compile(r"^/clientes/(\d+)$")
 # Nome da tag de IA ativa, por cliente. O comportamento é geral; o nome é
 # convenção de cada CRM (ver worker_agente.tag_ia_de).
 ROTA_CLIENTE_TAG_IA = re.compile(r"^/clientes/(\d+)/tag-ia$")
+# Funis da conta Kommo do cliente, pro select da tela — digitar id de funil na
+# mão é como digitar path de MCP: erra.
+ROTA_CLIENTE_FUNIS = re.compile(r"^/clientes/(\d+)/funis$")
 ROTA_CLIENTE_LOGS = re.compile(r"^/clientes/(\d+)/logs$")
 ROTA_CLIENTE_CREDENCIAIS = re.compile(r"^/clientes/(\d+)/credenciais$")
 ROTA_CLIENTE_MENSAGENS = re.compile(r"^/clientes/(\d+)/mensagens$")
@@ -270,8 +273,10 @@ class Handler(BaseHTTPRequestHandler):
             # antes do webhook existir) — provisiona a tag como no contato
             # novo via WhatsApp (_provisionar_tag_ia_ativa), só que aqui a
             # gente já tem o lead_id, sem precisar buscar por telefone.
-            tag_ia = worker_agente.tag_ia_de(db.obter_cliente(cliente_id) or {})
+            cliente_fn = db.obter_cliente(cliente_id) or {}
+            tag_ia = worker_agente.tag_ia_de(cliente_fn)
             if (tag_ia not in tags
+                    and not worker_agente._fora_do_funil(cliente_fn, pipeline_id)
                     and worker_agente.TAG_TRANSFERIDO_ATENDENTE not in tags):
                 resultado = kommo_cartao.adicionar_tag(
                     credenciais["kommo_domain"], credenciais["access_token"],
@@ -491,6 +496,28 @@ class Handler(BaseHTTPRequestHandler):
             self._responder_json(200, {"mcps": ligados})
             return
 
+        m = ROTA_CLIENTE_FUNIS.match(self.path)
+        if m:
+            cliente_id = int(m.group(1))
+            credenciais = db.obter_credenciais_kommo(cliente_id)
+            if not credenciais:
+                self._responder_json(200, {"funis": [], "aviso": "cliente sem Kommo cadastrado"})
+                return
+            try:
+                d = kommo_cartao._chamar(  # noqa: SLF001 — leitura de infra, não ferramenta do agente
+                    credenciais["kommo_domain"], credenciais["access_token"],
+                    "GET", "/api/v4/leads/pipelines")
+            except Exception as e:  # noqa: BLE001 — Kommo fora não derruba a tela
+                self._responder_json(502, {"error": f"Kommo não respondeu: {str(e)[:200]}"})
+                return
+            funis = [{"id": f["id"], "nome": f.get("name", "")}
+                     for f in (d.get("_embedded") or {}).get("pipelines") or []]
+            self._responder_json(200, {
+                "funis": funis,
+                "selecionado": int((db.obter_cliente(cliente_id) or {}).get("kommo_funil_id") or 0),
+            })
+            return
+
         m = ROTA_CLIENTE_MIDIAS.match(self.path)
         if m:
             itens = db.listar_midias_do_cliente(int(m.group(1)))
@@ -642,13 +669,24 @@ class Handler(BaseHTTPRequestHandler):
             if db.obter_cliente(cliente_id) is None:
                 self._responder_json(404, {"error": "cliente não encontrado"})
                 return
-            atual = db.definir_tag_ia(cliente_id, str(self._ler_corpo().get("tag", "")))
+            corpo = self._ler_corpo()
+            atual = db.definir_tag_ia(cliente_id, str(corpo.get("tag", "")))
+            funil = 0
+            if "funil_id" in corpo:
+                try:
+                    funil = int(corpo.get("funil_id") or 0)
+                except (TypeError, ValueError):
+                    funil = 0
+                db.definir_funil_ia(cliente_id, funil)
             db.registrar_log(cliente_id, "sistema",
-                             f"Tag de IA ativa agora é '{atual}'. Vale para as "
-                             "próximas marcações; leads já marcados com o nome "
-                             "anterior continuam como estão — e deixam de ser "
-                             "reconhecidos, então renomeie lá também se já usou.")
-            self._responder_json(200, {"tag": atual})
+                             f"Tag de IA ativa agora é '{atual or '(sem tag)'}'"
+                             + (f", restrita ao funil {funil}" if funil else ", valendo em todos os funis")
+                             + ". Vale para as próximas marcações; leads já marcados "
+                               "com o nome anterior continuam como estão.")
+            self._responder_json(200, {
+                "tag": atual,
+                "funil_id": int((db.obter_cliente(cliente_id) or {}).get("kommo_funil_id") or 0),
+            })
             return
 
         if ROTA_GERAL.match(self.path):

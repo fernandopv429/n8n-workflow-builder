@@ -103,6 +103,12 @@ def garantir_schema():
         # (pedido do Fernando, 01/11/2026). Vazio volta ao padrão.
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS "
                      "tag_ia_ativa TEXT NOT NULL DEFAULT 'IA ATIVA'")
+        # Funil em que o agente atua. 0 = todos. A conta da performace tem 17
+        # funis e só um é da campanha — sem isto, um lead com a tag certa em
+        # QUALQUER funil (inclusive "Teste") seria atendido (10/11/2026,
+        # pedido do Fernando).
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS "
+                     "kommo_funil_id BIGINT NOT NULL DEFAULT 0")
         # Migração 15/10/2026 (clonado->ativo) + 30/10/2026 (drop de
         # workflow_novo_id/url) já rodaram com sucesso e cumpriram o papel —
         # REMOVIDAS em 31/10/2026 depois de descobrir que elas travavam TODO
@@ -1352,6 +1358,13 @@ def remover_mcp_do_cliente(cliente_id: int, apelido: str):
     with _conectar() as conn:
         conn.execute("DELETE FROM cliente_mcps WHERE cliente_id = %s AND apelido = %s",
                      (cliente_id, apelido))
+
+
+def definir_funil_ia(cliente_id: int, funil_id: int):
+    """Restringe o agente a um funil do Kommo. 0 volta a valer pra todos."""
+    with _conectar() as conn:
+        conn.execute("UPDATE clientes SET kommo_funil_id = %s WHERE id = %s",
+                     (int(funil_id or 0), cliente_id))
 
 
 def definir_tag_ia(cliente_id: int, tag: str) -> str:

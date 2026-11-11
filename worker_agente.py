@@ -264,6 +264,30 @@ def tag_ia_de(cliente: dict) -> str:
     return valor.strip()
 
 
+def funil_ia_de(cliente: dict) -> int:
+    """Funil do Kommo em que o agente atua. 0 = todos.
+
+    A conta pode ter dezenas de funis (a da performace tem 17) e só um ser da
+    campanha — sem o filtro, um lead com a tag certa em QUALQUER funil seria
+    atendido, inclusive nos de teste e de e-mail marketing.
+    """
+    try:
+        return int((cliente or {}).get("kommo_funil_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fora_do_funil(cliente: dict, pipeline_id) -> bool:
+    """True quando há funil configurado E o lead comprovadamente está em outro.
+
+    `pipeline_id` desconhecido (None — cache antigo, busca que não trouxe)
+    NÃO bloqueia: calar o agente por falta de informação derrubaria leads
+    legítimos em silêncio, e o erro ficaria invisível.
+    """
+    funil = funil_ia_de(cliente)
+    return bool(funil and pipeline_id and int(pipeline_id) != funil)
+
+
 def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
     """Primeira mensagem de um contato novo (`contato["criado_agora"]`): se o
     cliente tem Kommo e existe um lead com este telefone, já marca a tag
@@ -310,6 +334,14 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
             return
         tags = lead.get("tags", [])
         status_id, pipeline_id = lead.get("status_id"), lead.get("pipeline_id")
+        if _fora_do_funil(cliente, pipeline_id):
+            # guarda o espelho mesmo assim: é ele que poupa a busca ao vivo
+            # nas próximas mensagens — e que diz que o lead é de outro funil
+            db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags, status_id, pipeline_id)
+            db.registrar_log(cliente["id"], "sistema",
+                             f"[worker] contato novo {tel}: lead {lead.get('id')} está no "
+                             f"funil {pipeline_id}, fora do funil do agente — sem tag, IA não atende.")
+            return
         tag_ia = tag_ia_de(cliente)
         if tag_ia in tags or TAG_TRANSFERIDO_ATENDENTE in tags:
             db.salvar_lead_kommo(cliente["id"], tel, lead["id"], tags, status_id, pipeline_id)
@@ -368,6 +400,8 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         return True
     lead_local = db.obter_lead_kommo(cliente["id"], contato["id_whatsapp"])
     if lead_local is not None:
+        if _fora_do_funil(cliente, lead_local.get("pipeline_id")):
+            return False
         tags = lead_local["tags"]
         if TAG_TRANSFERIDO_ATENDENTE in tags:
             return False
@@ -388,6 +422,8 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         db.registrar_log(cliente["id"], "erro",
                          f"[worker] falha ao checar tag de ativação no Kommo: {e}")
         return True
+    if _fora_do_funil(cliente, lead.get("pipeline_id")):
+        return False
     if TAG_TRANSFERIDO_ATENDENTE in tags:
         return False
     return tag_ia_de(cliente) in tags

@@ -1789,19 +1789,34 @@ async function montarTagIa() {
     tag = c.tag_ia_ativa || 'IA ATIVA';
   } catch (e) { /* sem resposta: abre com o padrão */ }
 
+  // Funis vêm do próprio Kommo: digitar id de funil na mão erra, igual path
+  // de MCP. Cliente sem Kommo recebe lista vazia e o select nem aparece.
+  let funis = [], funilSel = 0;
+  try {
+    const f = await (await fetch(`/clientes/${clienteAtualId}/funis`)).json();
+    funis = f.funis || [];
+    funilSel = f.selecionado || 0;
+  } catch (e) { /* Kommo fora: segue sem o select */ }
+
   const semTag = tag === '';
   cfg.innerHTML = `
     <p class="hint">Tag que marca no Kommo que a IA cuida do lead. Enquanto o
       lead tiver esta tag — e não tiver a de transferência — o agente responde.
       Troque se a sua equipe já usa outro nome no CRM, ou desmarque para não
       usar tag nenhuma: aí a IA responde qualquer lead e quem decide é só o
-      status aqui do Atendimento.</p>
+      status aqui do Atendimento. O funil restringe onde o agente atua: lead
+      de outro funil não é respondido nem recebe tag.</p>
     <div class="linha" style="gap:8px; align-items:center; flex-wrap:wrap">
       <label class="opcional"><input type="checkbox" id="tag-ia-usar"
              ${semTag ? '' : 'checked'}> usar tag</label>
       <input type="text" id="tag-ia" value="${escaparHtml(semTag ? 'IA ATIVA' : tag)}"
              placeholder="IA ATIVA" style="max-width:220px"
              ${semTag ? 'disabled' : ''}>
+      ${funis.length ? `<select id="funil-ia" style="max-width:260px">
+        <option value="0">todos os funis</option>
+        ${funis.map(f => `<option value="${f.id}" ${f.id === funilSel ? 'selected' : ''}>
+          ${escaparHtml(f.nome)}</option>`).join('')}
+      </select>` : ''}
       <button type="button" class="handoff-botao" id="btn-tag-ia">Salvar</button>
       <span id="tag-ia-aviso" class="opcional"></span>
     </div>`;
@@ -1820,6 +1835,7 @@ async function montarTagIa() {
       body: JSON.stringify({
         tag: document.getElementById('tag-ia-usar').checked
           ? document.getElementById('tag-ia').value : '',
+        funil_id: Number((document.getElementById('funil-ia') || {}).value || 0),
       }),
     });
     const d = await r.json();
