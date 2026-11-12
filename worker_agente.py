@@ -457,13 +457,21 @@ def _ativar_lead_do_funil(cliente: dict, contato: dict, lead_id: int,
         return False  # sem funil configurado, o conservador continua: calar
     tag_ia = tag_ia_de(cliente)
     credenciais = db.obter_credenciais_kommo(cliente["id"])
+    dominio = credenciais["kommo_domain"]
+    token = credenciais["access_token"]
     try:
-        resultado = kommo_cartao.adicionar_tag(
-            credenciais["kommo_domain"], credenciais["access_token"],
-            str(lead_id), tag_ia, ", ".join(tags))
+        # Busca tags atuais do Kommo antes do PATCH — o Kommo substitui a lista
+        # inteira, então o parâmetro `tags` (que pode ser do cache) não é confiável.
+        cartao_bruto = kommo_cartao.consultar_cartao_lead(dominio, token, str(lead_id))
+        if cartao_bruto.startswith("erro"):
+            raise RuntimeError(cartao_bruto)
+        tags_str = json.loads(cartao_bruto).get("tags_atuais", "")
+        tags_vivas = [t.strip() for t in tags_str.split(",") if t.strip()]
+        resultado = kommo_cartao.adicionar_tag(dominio, token, str(lead_id), tag_ia,
+                                               ", ".join(tags_vivas))
         if resultado.startswith("erro"):
             raise RuntimeError(resultado)
-        tags_agora = json.loads(resultado).get("tags_agora", tags + [tag_ia])
+        tags_agora = json.loads(resultado).get("tags_agora", tags_vivas + [tag_ia])
         db.salvar_lead_kommo(cliente["id"], contato["id_whatsapp"], lead_id,
                              tags_agora, None, pipeline_id)
         db.registrar_log(cliente["id"], "sistema",
