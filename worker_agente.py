@@ -363,6 +363,65 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
                          f"[worker] falha ao provisionar tag IA ATIVA no Kommo: {e}")
 
 
+def _garantir_tag_ia_follow_up(cliente: dict, id_whatsapp: str) -> None:
+    """Follow-up explícito (equipe enviou primeiro): adiciona BN-IA sem verificar funil.
+
+    `_provisionar_tag_ia_ativa` pula leads que já estão em `kommo_leads` (poupando
+    busca desnecessária quando o webhook já tratou o lead). `_ativar_lead_do_funil`
+    exige funil configurado. Numa situação de disparo, nenhuma das duas restrições
+    faz sentido — a intenção é clara e precisamos garantir a tag independente de cache."""
+    tag_ia = tag_ia_de(cliente)
+    if not tag_ia:
+        return
+    credenciais = db.obter_credenciais_kommo(cliente["id"])
+    if not credenciais:
+        return
+    dominio = credenciais.get("kommo_domain", "")
+    token = credenciais.get("access_token", "")
+    if not dominio or not token:
+        return
+
+    lead_local = db.obter_lead_kommo(cliente["id"], id_whatsapp)
+    if lead_local is None:
+        try:
+            bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, id_whatsapp)
+            if bruto.startswith("erro"):
+                db.registrar_log(cliente["id"], "erro",
+                                 f"[worker] follow-up {id_whatsapp}: falha ao buscar lead: {bruto}")
+                return
+            d = json.loads(bruto)
+            if not d.get("encontrado"):
+                db.registrar_log(cliente["id"], "sistema",
+                                 f"[worker] follow-up {id_whatsapp}: nenhum lead no Kommo.")
+                return
+            lead_local = {"id": d["id"], "tags": d.get("tags", []),
+                          "pipeline_id": d.get("pipeline_id")}
+            db.salvar_lead_kommo(cliente["id"], id_whatsapp, d["id"], d.get("tags", []),
+                                 d.get("status_id"), d.get("pipeline_id"))
+        except Exception as e:  # noqa: BLE001
+            db.registrar_log(cliente["id"], "erro",
+                             f"[worker] follow-up {id_whatsapp}: erro ao buscar lead: {e}")
+            return
+
+    if tag_ia in lead_local["tags"] or TAG_TRANSFERIDO_ATENDENTE in lead_local["tags"]:
+        return  # já tem tag ou transferido — não mexe
+
+    try:
+        resultado = kommo_cartao.adicionar_tag(
+            dominio, token, str(lead_local["id"]), tag_ia, ", ".join(lead_local["tags"]))
+        if resultado.startswith("erro"):
+            raise RuntimeError(resultado)
+        tags_agora = json.loads(resultado).get("tags_agora", lead_local["tags"] + [tag_ia])
+        db.salvar_lead_kommo(cliente["id"], id_whatsapp, lead_local["id"],
+                             tags_agora, None, lead_local.get("pipeline_id"))
+        db.registrar_log(cliente["id"], "sistema",
+                         f"[worker] follow-up {id_whatsapp}: tag '{tag_ia}' adicionada "
+                         f"ao lead {lead_local['id']} (disparo explícito, sem verificar funil).")
+    except Exception as e:  # noqa: BLE001
+        db.registrar_log(cliente["id"], "erro",
+                         f"[worker] follow-up {id_whatsapp}: falha ao adicionar tag '{tag_ia}': {e}")
+
+
 def _ativar_lead_do_funil(cliente: dict, contato: dict, lead_id: int,
                           tags: list, pipeline_id) -> bool:
     """Lead do funil configurado, sem NENHUMA tag de decisão: ativa agora.
@@ -1127,17 +1186,7 @@ def processar(payload: dict) -> dict:
                              f"[worker] mensagem da equipe abriu conversa com "
                              f"{id_whatsapp} (follow-up) — contato segue com a IA.")
             try:
-                _provisionar_tag_ia_ativa(cliente, contato)
-                # o provisionamento pula quando o espelho já existe; se ele
-                # existir SEM a tag e o lead for do funil, ativa mesmo assim
-                lead_local = db.obter_lead_kommo(cliente_id, id_whatsapp)
-                if (lead_local is not None
-                        and tag_ia_de(cliente)
-                        and tag_ia_de(cliente) not in lead_local["tags"]
-                        and TAG_TRANSFERIDO_ATENDENTE not in lead_local["tags"]):
-                    _ativar_lead_do_funil(cliente, contato, lead_local["id"],
-                                          lead_local["tags"],
-                                          lead_local.get("pipeline_id"))
+                _garantir_tag_ia_follow_up(cliente, id_whatsapp)
             except Exception as e:  # noqa: BLE001 — tag é bônus; o disparo já saiu
                 db.registrar_log(cliente_id, "erro",
                                  f"[worker] follow-up sem tag de ativação: {e}")
