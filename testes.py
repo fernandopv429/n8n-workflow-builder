@@ -2073,7 +2073,74 @@ def teste_lead_do_funil_sem_tag_e_ativado_na_hora():
          db.registrar_log, kc.adicionar_tag) = orig
 
 
+def teste_fromme_distingue_disparo_de_intervencao():
+    """A mesma mensagem fromMe significa coisas opostas conforme o momento.
+
+    Follow-up (equipe abre a conversa, agente nunca falou): marcar HUMANO
+    mataria o atendimento antes de existir — o lead responderia pro vácuo.
+    Intervenção (agente já conversava): o atendente entrou por cima, e o
+    agente tem que parar sozinho."""
+    import db
+    import worker_agente as w
+
+    chamadas = []
+    originais = {
+        "contato": db.obter_ou_criar_contato,
+        "status": db.definir_status_contato,
+        "evento": db.registrar_evento_atendimento,
+        "log": db.registrar_log,
+        "cliente": db.obter_cliente,
+        "tem_resposta": db.contato_tem_resposta_do_agente,
+        "lead": db.obter_lead_kommo,
+        "prov": w._provisionar_tag_ia_ativa,
+        "dedup": db.registrar_mensagem_processada,
+    }
+    # a idempotência grava no banco de verdade e tem FK pra clientes — dublar
+    # evita que o teste dependa de um cliente id=1 existir
+    db.registrar_mensagem_processada = lambda mid, cid: True
+    db.obter_ou_criar_contato = lambda cid, tel, nome="": {
+        "id": 9, "cliente_id": cid, "id_whatsapp": tel, "status": "IA",
+        "criado_agora": False, "kommo_lead_id": 0}
+    db.definir_status_contato = lambda *a: chamadas.append(("status", a))
+    db.registrar_evento_atendimento = lambda cid, tipo, det=None: chamadas.append(("evento", tipo))
+    db.registrar_log = lambda *a: chamadas.append(("log", a[2][:40]))
+    db.obter_cliente = lambda cid: {"id": cid, "cliente_nome": "x",
+                                    "tag_ia_ativa": "BN-IA", "kommo_funil_id": 0}
+    db.obter_lead_kommo = lambda cid, tel: None
+    w._provisionar_tag_ia_ativa = lambda cliente, contato: chamadas.append(("provisionar", contato["id"]))
+    try:
+        # disparo: agente nunca falou -> segue IA, provisiona a tag
+        db.contato_tem_resposta_do_agente = lambda cid: False
+        r = w.processar({"cliente_id": 1, "id_whatsapp": "5511", "tipo": "humano_respondeu",
+                         "mensagem_id": "M1"})
+        assert r is None
+        assert ("provisionar", 9) in chamadas, chamadas
+        assert not any(c[0] == "status" for c in chamadas), "marcou HUMANO num disparo"
+        assert ("evento", "disparo_detectado") in chamadas
+
+        # intervenção: agente já falou -> HUMANO, sem provisionar
+        chamadas.clear()
+        db.contato_tem_resposta_do_agente = lambda cid: True
+        r = w.processar({"cliente_id": 1, "id_whatsapp": "5511", "tipo": "humano_respondeu",
+                         "mensagem_id": "M2"})
+        assert r is None
+        assert ("status", (9, "HUMANO")) in chamadas, chamadas
+        assert not any(c[0] == "provisionar" for c in chamadas)
+        assert ("evento", "humano_respondeu") in chamadas
+    finally:
+        db.obter_ou_criar_contato = originais["contato"]
+        db.definir_status_contato = originais["status"]
+        db.registrar_evento_atendimento = originais["evento"]
+        db.registrar_log = originais["log"]
+        db.obter_cliente = originais["cliente"]
+        db.contato_tem_resposta_do_agente = originais["tem_resposta"]
+        db.obter_lead_kommo = originais["lead"]
+        w._provisionar_tag_ia_ativa = originais["prov"]
+        db.registrar_mensagem_processada = originais["dedup"]
+
+
 TESTES = [
+    teste_fromme_distingue_disparo_de_intervencao,
     teste_lead_do_funil_sem_tag_e_ativado_na_hora,
     teste_funil_restringe_onde_o_agente_atua,
     teste_sem_tag_a_ia_responde_qualquer_lead,

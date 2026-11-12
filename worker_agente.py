@@ -1106,10 +1106,43 @@ def processar(payload: dict) -> dict:
     # só mensagem mandada por uma pessoa (não pela nossa API) volta assim.
     if tipo == "humano_respondeu":
         contato = db.obter_ou_criar_contato(cliente_id, id_whatsapp, "")
-        # Força HUMANO mesmo se já estava — mesma trava de segurança do
-        # workflow "Ecossistema IA - Bruno": se um atendente escreve direto
-        # no WhatsApp sem passar pelo painel ou pelo chamar_humano, o agente
-        # para sozinho, sem precisar de ninguém clicar "Assumir".
+
+        # DISPARO ou INTERVENÇÃO? A mesma mensagem fromMe significa coisas
+        # opostas conforme o momento (12/11/2026, fluxo de follow-up do
+        # Fernando):
+        #
+        # - o agente NUNCA falou neste contato: é a equipe abrindo conversa
+        #   (follow-up, campanha). Marcar HUMANO aqui mataria o atendimento
+        #   antes de ele existir — o lead responderia pro vácuo. Segue IA, e
+        #   o lead já ganha a tag de ativação AGORA, pra equipe ver no Kommo
+        #   que a resposta será da IA.
+        #
+        # - o agente JÁ respondeu aqui: é um atendente entrando por cima da
+        #   conversa. O agente para sozinho, sem ninguém clicar "Assumir" —
+        #   trava de segurança de sempre (workflow "Ecossistema IA - Bruno").
+        if not db.contato_tem_resposta_do_agente(contato["id"]):
+            db.registrar_evento_atendimento(contato["id"], "disparo_detectado",
+                                            {"mensagem_id": mensagem_id})
+            db.registrar_log(cliente_id, "sistema",
+                             f"[worker] mensagem da equipe abriu conversa com "
+                             f"{id_whatsapp} (follow-up) — contato segue com a IA.")
+            try:
+                _provisionar_tag_ia_ativa(cliente, contato)
+                # o provisionamento pula quando o espelho já existe; se ele
+                # existir SEM a tag e o lead for do funil, ativa mesmo assim
+                lead_local = db.obter_lead_kommo(cliente_id, id_whatsapp)
+                if (lead_local is not None
+                        and tag_ia_de(cliente)
+                        and tag_ia_de(cliente) not in lead_local["tags"]
+                        and TAG_TRANSFERIDO_ATENDENTE not in lead_local["tags"]):
+                    _ativar_lead_do_funil(cliente, contato, lead_local["id"],
+                                          lead_local["tags"],
+                                          lead_local.get("pipeline_id"))
+            except Exception as e:  # noqa: BLE001 — tag é bônus; o disparo já saiu
+                db.registrar_log(cliente_id, "erro",
+                                 f"[worker] follow-up sem tag de ativação: {e}")
+            return None
+
         db.definir_status_contato(contato["id"], "HUMANO")
         db.registrar_evento_atendimento(contato["id"], "humano_respondeu",
                                         {"mensagem_id": mensagem_id})

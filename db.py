@@ -1367,6 +1367,21 @@ def definir_funil_ia(cliente_id: int, funil_id: int):
                      (int(funil_id or 0), cliente_id))
 
 
+def contato_tem_resposta_do_agente(contato_id: int) -> bool:
+    """O agente já falou nesta conversa?
+
+    É o que separa DISPARO de INTERVENÇÃO quando chega mensagem fromMe: num
+    contato onde o agente nunca respondeu, mensagem do próprio número é
+    follow-up/campanha (a equipe abrindo conversa); onde o agente já estava
+    conversando, é um atendente entrando por cima — e aí o agente deve parar.
+    """
+    with _conectar() as conn:
+        cur = conn.execute(
+            "SELECT 1 FROM agente_mensagens WHERE contato_id = %s "
+            "AND role = 'assistant' LIMIT 1", (contato_id,))
+        return cur.fetchone() is not None
+
+
 def definir_tag_ia(cliente_id: int, tag: str) -> str:
     """Troca o nome da tag de IA ativa deste cliente. Devolve o valor que ficou.
 
