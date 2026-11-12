@@ -204,29 +204,52 @@ def criar_tarefa(kommo_domain: str, access_token: str, lead_id: str,
 
 @_legivel
 def buscar_lead_por_telefone(kommo_domain: str, access_token: str, telefone: str) -> str:
-    """Busca o lead vinculado ao CONTATO que tem este telefone.
+    """Acha o lead deste telefone: primeiro pelo CONTATO, depois por busca
+    textual em LEADS.
 
-    O telefone mora no contato, não no lead — `/api/v4/leads?query=` não
-    alcança esse campo (confirmado 01/11/2026: lead existia, telefone batia
-    até com o "+" igual ao salvo no Kommo, e a busca por lead não achava
-    nada). Por isso dois passos: busca o CONTATO por telefone
-    (`/api/v4/contacts?query=`, que searcha phone/email de verdade), pega o
-    primeiro lead ligado a ele, e só então consulta esse lead pras tags.
+    O caminho "certo" é o contato (o telefone mora nele), mas lead de campanha
+    importado em massa muitas vezes NÃO tem contato vinculado — o telefone fica
+    num campo personalizado do próprio lead. Foi exatamente o caso da Black
+    November da performace (12/11/2026): 13 contatos batiam com o número, nenhum
+    com lead, e `/api/v4/leads?query=` achava o lead na hora. Sem o fallback, o
+    lead existia e o sistema jurava que não.
 
-    Devolve o PRIMEIRO contato/lead encontrado (um telefone raras vezes bate
-    em mais de um). {"encontrado": false} se não achar contato, ou se achar
-    o contato mas ele não tiver nenhum lead vinculado — não cria nada, só
-    procura."""
+    Dois cuidados que vieram de erro real:
+    - TODOS os contatos retornados são examinados, não só o primeiro — a busca
+      do Kommo é generosa e devolve homônimos parciais na frente do certo.
+    - Com mais de um lead, vale o de id maior (mais recente): lead antigo
+      fechado não é a conversa de agora.
+
+    Devolve {"encontrado": false} se nada achar — não cria nada, só procura."""
     numero = "".join(ch for ch in telefone if ch.isdigit())
-    d = _chamar(kommo_domain, access_token, "GET",
-                f"/api/v4/contacts?query={urllib.parse.quote(numero)}&with=leads")
-    contatos = (d.get("_embedded") or {}).get("contacts") or []
-    if not contatos:
+    formas = [numero]
+    if numero.startswith("55") and len(numero) >= 12:
+        formas.append(numero[2:])   # como o painel do Kommo costuma salvar
+
+    candidatos = []
+    for forma in formas:
+        d = _chamar(kommo_domain, access_token, "GET",
+                    f"/api/v4/contacts?query={urllib.parse.quote(forma)}&with=leads")
+        for contato in (d.get("_embedded") or {}).get("contacts") or []:
+            candidatos += [l["id"] for l in
+                           (contato.get("_embedded") or {}).get("leads") or []]
+        if candidatos:
+            break
+
+    if not candidatos:
+        # fallback: o telefone está escrito no próprio lead (nome ou campo
+        # personalizado), não num contato
+        for forma in formas:
+            d = _chamar(kommo_domain, access_token, "GET",
+                        f"/api/v4/leads?query={urllib.parse.quote(forma)}")
+            candidatos += [l["id"] for l in (d.get("_embedded") or {}).get("leads") or []]
+            if candidatos:
+                break
+
+    if not candidatos:
         return json.dumps({"encontrado": False}, ensure_ascii=False)
-    leads_do_contato = ((contatos[0].get("_embedded") or {}).get("leads") or [])
-    if not leads_do_contato:
-        return json.dumps({"encontrado": False}, ensure_ascii=False)
-    lead_id = leads_do_contato[0]["id"]
+
+    lead_id = max(candidatos)
     lead = _chamar(kommo_domain, access_token, "GET", f"/api/v4/leads/{lead_id}")
     return json.dumps({
         "encontrado": True, "id": lead_id, "tags": _tags_do_lead(lead),

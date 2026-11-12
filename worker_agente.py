@@ -363,6 +363,45 @@ def _provisionar_tag_ia_ativa(cliente: dict, contato: dict) -> None:
                          f"[worker] falha ao provisionar tag IA ATIVA no Kommo: {e}")
 
 
+def _ativar_lead_do_funil(cliente: dict, contato: dict, lead_id: int,
+                          tags: list, pipeline_id) -> bool:
+    """Lead do funil configurado, sem NENHUMA tag de decisão: ativa agora.
+
+    "Sem nenhuma das duas tags" era tratado como "não decidido" e calava o
+    agente — seguro quando não se sabe de onde o lead veio. Mas com funil
+    configurado o sinal é outro: estar NO funil da campanha é a decisão. Foi
+    o que faltou no teste de 12/11: lead da Black November sem tag ficava
+    mudo pra sempre, porque o provisionamento só roda pra contato novo.
+
+    Devolve True se ativou (ou já estava ativo); False se não deu pra ativar —
+    e aí o chamador cala, porque responder sem conseguir marcar quebraria o
+    combinado de que "tag = IA cuidando".
+    """
+    funil = funil_ia_de(cliente)
+    if not funil or _fora_do_funil(cliente, pipeline_id) or not pipeline_id:
+        return False  # sem funil configurado, o conservador continua: calar
+    tag_ia = tag_ia_de(cliente)
+    credenciais = db.obter_credenciais_kommo(cliente["id"])
+    try:
+        resultado = kommo_cartao.adicionar_tag(
+            credenciais["kommo_domain"], credenciais["access_token"],
+            str(lead_id), tag_ia, ", ".join(tags))
+        if resultado.startswith("erro"):
+            raise RuntimeError(resultado)
+        tags_agora = json.loads(resultado).get("tags_agora", tags + [tag_ia])
+        db.salvar_lead_kommo(cliente["id"], contato["id_whatsapp"], lead_id,
+                             tags_agora, None, pipeline_id)
+        db.registrar_log(cliente["id"], "sistema",
+                         f"[worker] lead {lead_id} está no funil do agente e não "
+                         f"tinha tag nenhuma — '{tag_ia}' aplicada, IA atende.")
+        return True
+    except Exception as e:  # noqa: BLE001 — Kommo fora/sem escrita: fica como estava
+        db.registrar_log(cliente["id"], "erro",
+                         f"[worker] lead {lead_id} no funil do agente, mas não deu "
+                         f"pra aplicar '{tag_ia}': {e}")
+        return False
+
+
 def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
     """Decide, pelas tags do Kommo, se a IA pode responder este contato agora.
 
@@ -405,7 +444,10 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         tags = lead_local["tags"]
         if TAG_TRANSFERIDO_ATENDENTE in tags:
             return False
-        return tag_ia_de(cliente) in tags
+        if tag_ia_de(cliente) in tags:
+            return True
+        return _ativar_lead_do_funil(cliente, contato, lead_local["id"],
+                                     tags, lead_local.get("pipeline_id"))
     try:
         bruto = kommo_cartao.buscar_lead_por_telefone(dominio, token, contato["id_whatsapp"])
         if bruto.startswith("erro"):
@@ -426,7 +468,10 @@ def _lead_permite_ia(cliente: dict, contato: dict) -> bool:
         return False
     if TAG_TRANSFERIDO_ATENDENTE in tags:
         return False
-    return tag_ia_de(cliente) in tags
+    if tag_ia_de(cliente) in tags:
+        return True
+    return _ativar_lead_do_funil(cliente, contato, lead["id"],
+                                 tags, lead.get("pipeline_id"))
 
 
 # Ferramentas do Cartão do Lead (Kommo), nativas — 30/10/2026: antes essas 7

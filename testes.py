@@ -1898,14 +1898,19 @@ def teste_tag_personalizada_decide_se_a_ia_responde():
     db.obter_credenciais_kommo = lambda cid: {"kommo_domain": "x.kommo.com",
                                               "access_token": "t"}
     try:
-        db.obter_lead_kommo = lambda cid, tel: {"tags": ["BOT CUIDANDO"]}
+        db.obter_lead_kommo = lambda cid, tel: {"id": 9, "tags": ["BOT CUIDANDO"],
+                                                "pipeline_id": None}
         assert w._lead_permite_ia(cliente, contato) is True
-        # a tag padrão NÃO vale pra quem escolheu outra
-        db.obter_lead_kommo = lambda cid, tel: {"tags": ["IA ATIVA"]}
+        # a tag padrão NÃO vale pra quem escolheu outra (sem funil configurado,
+        # lead sem a tag certa continua calado — ativação automática é só com
+        # funil, ver _ativar_lead_do_funil)
+        db.obter_lead_kommo = lambda cid, tel: {"id": 9, "tags": ["IA ATIVA"],
+                                                "pipeline_id": None}
         assert w._lead_permite_ia(cliente, contato) is False
         # transferência continua mandando, seja qual for o nome da outra
         db.obter_lead_kommo = lambda cid, tel: {
-            "tags": ["BOT CUIDANDO", w.TAG_TRANSFERIDO_ATENDENTE]}
+            "id": 9, "tags": ["BOT CUIDANDO", w.TAG_TRANSFERIDO_ATENDENTE],
+            "pipeline_id": None}
         assert w._lead_permite_ia(cliente, contato) is False
     finally:
         db.obter_credenciais_kommo = orig_cred
@@ -2024,7 +2029,52 @@ def teste_funil_restringe_onde_o_agente_atua():
         db.obter_lead_kommo = orig_lead
 
 
+def teste_lead_do_funil_sem_tag_e_ativado_na_hora():
+    """Lead NO funil da campanha, sem nenhuma tag: ativa e responde.
+
+    Era o buraco do teste de 12/11: o provisionamento só roda pra contato
+    novo, então lead de campanha com contato antigo ficava mudo pra sempre."""
+    import json as _json
+    import db
+    import worker_agente as w
+    import kommo_cartao as kc
+
+    cliente = {"id": 1, "tag_ia_ativa": "BN-IA", "kommo_funil_id": 12104615}
+    contato = {"id": 1, "id_whatsapp": "5511942029143"}
+
+    aplicadas, espelhos, logs = [], [], []
+    orig = (db.obter_credenciais_kommo, db.obter_lead_kommo, db.salvar_lead_kommo,
+            db.registrar_log, kc.adicionar_tag)
+    db.obter_credenciais_kommo = lambda cid: {"kommo_domain": "x", "access_token": "t"}
+    db.salvar_lead_kommo = lambda *a, **kw: espelhos.append(a)
+    db.registrar_log = lambda cid, tipo, msg: logs.append((tipo, msg))
+    kc.adicionar_tag = lambda dom, tok, lid, tag, atuais: (
+        aplicadas.append((lid, tag)) or _json.dumps({"tags_agora": [tag]}))
+    try:
+        # cache: lead do funil, sem tag nenhuma -> ativa e responde
+        db.obter_lead_kommo = lambda cid, tel: {"id": 23361465, "tags": [],
+                                                "pipeline_id": 12104615}
+        assert w._lead_permite_ia(cliente, contato) is True
+        assert aplicadas == [("23361465", "BN-IA")], aplicadas
+        assert espelhos, "o espelho local não foi atualizado"
+
+        # sem funil configurado: conservador continua calando
+        aplicadas.clear()
+        cliente0 = dict(cliente, kommo_funil_id=0)
+        assert w._lead_permite_ia(cliente0, contato) is False
+        assert not aplicadas
+
+        # escrita no Kommo falhou (conta 402): cala e registra, não responde
+        kc.adicionar_tag = lambda *a: "erro: Kommo respondeu 402"
+        assert w._lead_permite_ia(cliente, contato) is False
+        assert any("não deu" in m for _, m in logs), logs
+    finally:
+        (db.obter_credenciais_kommo, db.obter_lead_kommo, db.salvar_lead_kommo,
+         db.registrar_log, kc.adicionar_tag) = orig
+
+
 TESTES = [
+    teste_lead_do_funil_sem_tag_e_ativado_na_hora,
     teste_funil_restringe_onde_o_agente_atua,
     teste_sem_tag_a_ia_responde_qualquer_lead,
     teste_editar_arquivo_barra_nome_vazio_e_duplicado,
