@@ -1105,6 +1105,17 @@ def _executar(nome: str, args: dict, credenciais: dict, cliente_id: int,
                 return "erro: este cliente ainda não tem Kommo cadastrado (configure na engrenagem)"
             fn = getattr(kommo_cartao, nome)
             parametros = {k: v for k, v in args.items() if k not in CHAVES_CREDENCIAL}
+            # adicionar_tag/remover_tag substituem a lista INTEIRA no Kommo — o
+            # modelo não tem como saber as tags atuais com certeza (só viu o que
+            # estava no cartão quando chamou consultar_cartao_lead, mas isso pode
+            # ter mudado). Sobrescrevemos tags_atuais com uma leitura ao vivo
+            # para garantir que nenhuma tag seja apagada por acidente.
+            if nome in ("adicionar_tag", "remover_tag"):
+                lead_id_str = str(parametros.get("lead_id", "")).strip()
+                if lead_id_str:
+                    cartao_bruto = kommo_cartao.consultar_cartao_lead(dominio, token, lead_id_str)
+                    if not cartao_bruto.startswith("erro"):
+                        parametros["tags_atuais"] = json.loads(cartao_bruto).get("tags_atuais", "")
             return fn(dominio, token, **parametros)
 
         # Ferramenta vinda de um MCP ligado a este cliente.
