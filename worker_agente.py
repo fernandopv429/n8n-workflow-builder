@@ -403,15 +403,31 @@ def _garantir_tag_ia_follow_up(cliente: dict, id_whatsapp: str) -> None:
                              f"[worker] follow-up {id_whatsapp}: erro ao buscar lead: {e}")
             return
 
-    if tag_ia in lead_local["tags"] or TAG_TRANSFERIDO_ATENDENTE in lead_local["tags"]:
+    # Busca tags ATUAIS do Kommo antes de qualquer PATCH — o Kommo substitui a
+    # lista inteira a cada chamada, então usar o cache (que pode estar desatualizado)
+    # apagaria tags que o time adicionou manualmente desde a última sincronização.
+    try:
+        cartao_bruto = kommo_cartao.consultar_cartao_lead(dominio, token, str(lead_local["id"]))
+        if cartao_bruto.startswith("erro"):
+            raise RuntimeError(cartao_bruto)
+        cartao = json.loads(cartao_bruto)
+        # consultar_cartao_lead já popula "tags_atuais" como string CSV
+        tags_str = cartao.get("tags_atuais", "")
+        tags_atuais = [t.strip() for t in tags_str.split(",") if t.strip()]
+    except Exception as e:  # noqa: BLE001 — fallback pro cache se a consulta falhar
+        db.registrar_log(cliente["id"], "erro",
+                         f"[worker] follow-up {id_whatsapp}: falha ao consultar cartão, usando cache: {e}")
+        tags_atuais = lead_local["tags"]
+
+    if tag_ia in tags_atuais or TAG_TRANSFERIDO_ATENDENTE in tags_atuais:
         return  # já tem tag ou transferido — não mexe
 
     try:
         resultado = kommo_cartao.adicionar_tag(
-            dominio, token, str(lead_local["id"]), tag_ia, ", ".join(lead_local["tags"]))
+            dominio, token, str(lead_local["id"]), tag_ia, ", ".join(tags_atuais))
         if resultado.startswith("erro"):
             raise RuntimeError(resultado)
-        tags_agora = json.loads(resultado).get("tags_agora", lead_local["tags"] + [tag_ia])
+        tags_agora = json.loads(resultado).get("tags_agora", tags_atuais + [tag_ia])
         db.salvar_lead_kommo(cliente["id"], id_whatsapp, lead_local["id"],
                              tags_agora, None, lead_local.get("pipeline_id"))
         db.registrar_log(cliente["id"], "sistema",
